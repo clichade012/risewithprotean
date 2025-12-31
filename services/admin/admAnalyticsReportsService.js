@@ -21,48 +21,30 @@ const PAGINATION_SIZE = process.env.PAGINATION_SIZE;
 const customer_analytics_reports_get = async (req, res, next) => {
     const { page_no, customer_id, search_text, product_id, from_date, upto_date, type } = req.body;
     try {
-        let _customer_id = customer_id && validator.isNumeric(customer_id.toString()) ? parseInt(customer_id) : 0;
-        let _search_text = search_text && search_text.length > 0 ? search_text : "";
-        let _page_no = page_no && validator.isNumeric(page_no.toString()) ? parseInt(page_no) : 0;
-        let _type = type && validator.isNumeric(type.toString()) ? parseInt(type) : 0;// 1 = prod and 2 = UAT
-        let email_id = '';
-        let previousfrom_Date = '';
-        if (from_date) {
-            let date = new Date(from_date);
-            date.setDate(date.getDate() - 1);
-            previousfrom_Date = date.toISOString().split('T')[0];
-        }
+        const _customer_id = parseNumericValue(customer_id);
+        const _search_text = search_text?.length > 0 ? search_text : "";
+        const _page_no = parseNumericValue(page_no) || 1;
+        const _type = parseNumericValue(type) || 1; // 1 = prod and 2 = UAT
 
-        let from_dateTime = '18:30:00.000 UTC';
-        let to_dateTime = '18:29:59.999 UTC';
-        let _from_date = previousfrom_Date + ' ' + from_dateTime;
-        let _upto_date = upto_date + ' ' + to_dateTime;
-        if (_page_no <= 0) { _page_no = 1; } if (_type <= 0) { _type = 1; }
-        const table_name = _type == 1 ? 'apigee_logs_prod' : 'apigee_logs';
+        const { _from_date, _upto_date } = calculateDateRanges(from_date, upto_date);
+        const table_name = _type === 1 ? 'apigee_logs_prod' : 'apigee_logs';
+
         const customer = await getCustomerById(_customer_id);
-        if (customer) {
-            email_id = customer.email_id;
-            //  developerId = customer.developer_id;
-        }
-
+        const email_id = customer?.email_id || '';
 
         const total_record = await fetchTotalRecordCount(table_name, _search_text, product_id, _from_date, _upto_date, email_id);
         const reports = await fetchReportsData(table_name, _search_text, product_id, _from_date, _upto_date, _page_no, email_id);
 
-        if (reports && reports.length > 0) {
-            const results = {
-                current_page: _page_no,
-                total_pages: Math.ceil(total_record / process.env.PAGINATION_SIZE),
-                total_record: total_record,
-                data: reports,
-            };
+        const hasReports = reports?.length > 0;
+        const results = {
+            current_page: _page_no,
+            total_pages: hasReports ? Math.ceil(total_record / process.env.PAGINATION_SIZE) : '',
+            total_record: hasReports ? total_record : 0,
+            data: reports || [],
+        };
+        const message = hasReports ? "Reports Data." : "Unable to find reports detail, Please try again.";
 
-            return res.status(200).json(success(true, res.statusCode, "Reports Data.", results));
-        } else {
-            const results = { current_page: _page_no, total_pages: '', data: [], };
-            return res.status(200).json(success(true, res.statusCode, "Unable to find reports detail, Please try again.", results));
-        }
-
+        return res.status(200).json(success(true, res.statusCode, message, results));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
@@ -496,10 +478,10 @@ function calculateDateRanges(from_date, upto_date) {
 }
 
 const analytics_reports_generate_excel = async (req, res, next) => {
-    const { page_no, customer_id, product_id, from_date, upto_date, type } = req.body;
+    const {  customer_id, product_id, from_date, upto_date, type } = req.body;
     try {
         const _customer_id = parseNumericValue(customer_id);
-        const _page_no = parseNumericValue(page_no) || 1;
+        // const _page_no = parseNumericValue(page_no) || 1;
         const _type = parseNumericValue(type) || 1; // 1 = prod and 2 = UAT
 
         const roleData = await getRoleByAdminId(req.token_data.admin_id);
@@ -1056,79 +1038,66 @@ function getExcelColumns() {
     ];
 }
 
+// Helper: Apply default values to specified fields
+function applyDefaults(row, fields, defaultValue = 0) {
+    const result = {};
+    fields.forEach(field => {
+        result[field] = row[field] || defaultValue;
+    });
+    return result;
+}
+
+// Helper: Build base entry from row
+function buildBaseEntry(row) {
+    return {
+        developer_email: row.developer_email,
+        company_name: row.company_name || "",
+        mobile_no: row.mobile_no || "",
+        billing_type: row.billing_type || "",
+        wallets_amount: row.wallets_amount || 0
+    };
+}
+
+// Helper: Get MTD (Month-to-Date) fields
+function getMTDFields() {
+    return [
+        'total_count', 'success_count', 'avg_success_rate', 'failure_count', 'avg_failure_rate',
+        'prev_day_success_count', 'percent_increase', 'mtd_success_rate',
+        'week1_success_count', 'week2_success_count', 'week3_success_count',
+        'week4_success_count', 'week5_success_count'
+    ];
+}
+
+// Helper: Get FY (Fiscal Year) fields
+function getFYFields() {
+    return ['total_success_count_fy', 'avg_success_count_fy', 'total_failure_count_fy', 'avg_failure_count_fy', 'total_count_fy'];
+}
+
 function buildMISDataMap(fyFinalData, finalData) {
     const dataMap = new Map();
+    const mtdFields = getMTDFields();
+    const fyFields = getFYFields();
 
-    // Add all users from FY Year Data first (ensuring all 50 users are included)
+    // Add all users from FY Year Data first
     fyFinalData.forEach(row => {
         dataMap.set(row.developer_email, {
-            developer_email: row.developer_email,
-            company_name: row.company_name || "",
-            mobile_no: row.mobile_no || "",
-            billing_type: row.billing_type || "",
-            wallets_amount: row.wallets_amount || 0,
-            success_count: 0, // Keep blank if no MTD data
-            avg_success_rate: 0,
-            failure_count: 0,
-            avg_failure_rate: 0,
-            total_count: 0,
-            total_success_count_fy: row.total_success_count_fy || 0,
-            avg_success_count_fy: row.avg_success_count_fy || 0,
-            total_failure_count_fy: row.total_failure_count_fy || 0,
-            avg_failure_count_fy: row.avg_failure_count_fy || 0,
-            total_count_fy: row.total_count_fy || 0,
-            prev_day_success_count: 0,
-            percent_increase: 0,
-            mtd_success_rate: 0,
-            week1_success_count: 0,
-            week2_success_count: 0,
-            week3_success_count: 0,
-            week4_success_count: 0,
-            week5_success_count: 0,
+            ...buildBaseEntry(row),
+            ...applyDefaults(row, mtdFields, 0),
+            ...applyDefaults(row, fyFields, 0)
         });
     });
 
     // Update with Daily MIS Data (MTD), keeping FY data unchanged
     finalData.forEach(row => {
+        const mtdData = applyDefaults(row, mtdFields, 0);
+
         if (dataMap.has(row.developer_email)) {
-            Object.assign(dataMap.get(row.developer_email), {
-                total_count: row.total_count || 0,
-                success_count: row.success_count || 0,
-                avg_success_rate: row.avg_success_rate || 0,
-                failure_count: row.failure_count || 0,
-                avg_failure_rate: row.avg_failure_rate || 0,
-                prev_day_success_count: row.prev_day_success_count || 0,
-                percent_increase: row.percent_increase || 0,
-                mtd_success_rate: row.mtd_success_rate || 0,
-                week1_success_count: row.week1_success_count || 0,
-                week2_success_count: row.week2_success_count || 0,
-                week3_success_count: row.week3_success_count || 0,
-                week4_success_count: row.week4_success_count || 0,
-                week5_success_count: row.week5_success_count || 0,
-            });
+            Object.assign(dataMap.get(row.developer_email), mtdData);
         } else {
-            dataMap.set(row.developer_email, {
-                developer_email: row.developer_email,
-                company_name: row.company_name || "",
-                mobile_no: row.mobile_no || "",
-                billing_type: row.billing_type || "",
-                wallets_amount: row.wallets_amount || 0,
-                success_count: row.success_count || 0,
-                avg_success_rate: row.avg_success_rate || 0,
-                failure_count: row.failure_count || 0,
-                avg_failure_rate: row.avg_failure_rate || 0,
-                total_count: row.total_count || 0,
-                prev_day_success_count: row.prev_day_success_count || 0,
-                percent_increase: row.percent_increase || 0,
-                mtd_success_rate: row.mtd_success_rate || 0,
-                week1_success_count: row.week1_success_count || 0,
-                week2_success_count: row.week2_success_count || 0,
-                week3_success_count: row.week3_success_count || 0,
-                week4_success_count: row.week4_success_count || 0,
-                week5_success_count: row.week5_success_count || 0,
-            });
+            dataMap.set(row.developer_email, { ...buildBaseEntry(row), ...mtdData });
         }
     });
+
     return dataMap;
 }
 
@@ -1192,7 +1161,7 @@ async function sendDailyMISMailer(filePath, fullTableRows) {
         raw: true
     });
 
-    if (!rowT || !rowT.length) {
+    if (!rowT?.length) {
         return -3; /* Template not found */
     }
 
