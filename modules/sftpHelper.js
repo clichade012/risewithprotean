@@ -1,5 +1,5 @@
 import FormData from 'form-data';
-import fs from 'fs';
+
 import fetch from 'cross-fetch';
 import db from '../database/db_helper.js';
 // const Client = require('ssh2-sftp-client');

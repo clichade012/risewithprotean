@@ -1,7 +1,5 @@
-import db from '../database/db_helper.js';
-import { QueryTypes } from 'sequelize';
+
 import * as sftpHelper from '../modules/sftpHelper.js';
-import fs from 'fs';
 import crypto from 'crypto';
 
 

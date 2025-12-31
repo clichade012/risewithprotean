@@ -676,7 +676,7 @@ const product_rate_attribute_approve = async (req, res, next) => {
                 );
 
                 if (affectedRows1 > 0) {
-                    const [affectedRows2] = await ProductRateAttribute.update(
+                    await ProductRateAttribute.update(
                         {
                             is_rate_plan_approved: true,
                             ckr_is_rate_plan_approved: true,

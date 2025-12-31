@@ -139,7 +139,7 @@ const role_list = async (req, res, next) => {
     try {
         let _page_no = page_no && validator.isNumeric(page_no.toString()) ? parseInt(page_no) : 0; if (_page_no <= 0) { _page_no = 1; }
         let _search_text = search_text && search_text.length > 0 ? search_text : "";
-        let _role_level = role_level && validator.isNumeric(role_level.toString()) ? parseInt(role_level) : 0;
+        // let _role_level = role_level && validator.isNumeric(role_level.toString()) ? parseInt(role_level) : 0;
 
         // Build where clause with case-insensitive search
         const whereClause = {

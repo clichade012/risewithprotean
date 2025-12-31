@@ -1,6 +1,5 @@
 import winston from 'winston';
 import 'winston-mongodb';
-import winstonRotator from 'winston-daily-rotate-file';
 import correlator from 'express-correlation-id';
 
 const { combine, timestamp, json } = winston.format;

@@ -1,6 +1,6 @@
 import { logger as _logger, action_logger } from '../../logger/winston.js';
 import db from '../../database/db_helper.js';
-import { QueryTypes, Op, fn, col, literal } from 'sequelize';
+import { QueryTypes, Op } from 'sequelize';
 import { success } from "../../model/responseModel.js";
 import dateFormat from 'date-format';
 import validator from 'validator';
@@ -15,7 +15,6 @@ import customerService from '../../services/customerService.js';
 import { PassThrough } from 'stream';
 import moment from 'moment';
 import path from 'path';
-import { createObjectCsvWriter } from 'csv-writer';
 import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs-extra';
 import commonModule from "../../modules/commonModule.js";
@@ -273,17 +272,86 @@ const customer_to_activate = async (req, res, next) => {
     }
 };
 
+// Helper: Create developer in Apigee
+async function createApigeeDeveloper(customerData) {
+    const { first_name, last_name, email_id } = customerData;
+    const product_URL = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/developers`;
+    const data = { firstName: first_name, lastName: last_name, userName: email_id, email: email_id };
+
+    const apigeeAuth = await db.get_apigee_token();
+    const response = await fetch(product_URL, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apigeeAuth}`, "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+    });
+    return response.json();
+}
+
+// Helper: Handle successful customer approval
+async function handleApprovalSuccess(req, customerId, customer, developerId, responseData) {
+    const { CstCustomer } = db.models;
+    const { first_name, last_name, email_id, company_name } = customer;
+
+    const [affectedRows] = await CstCustomer.update(
+        {
+            is_approved: 1,
+            approved_date: db.get_ist_current_date(),
+            developer_id: developerId,
+            approval_response: JSON.stringify(responseData),
+            approved_by: req.token_data.account_id
+        },
+        { where: { customer_id: customerId } }
+    );
+
+    if (affectedRows <= 0) return false;
+
+    // Insert into customer_data
+    try {
+        const _ad_query = `INSERT INTO customer_data(customer_id, first_name, last_name, email_id, developer_id, company_name) VALUES (?, ?, ?, ?, ?, ?)`;
+        await db.sequelize2.query(_ad_query, { replacements: [customerId, first_name, last_name, email_id, developerId, company_name], type: QueryTypes.INSERT });
+    } catch (_err) { _logger.error(_err.stack); }
+
+    await send_approved_email(customerId);
+    logCustomerApproval(req, customerId, email_id, developerId);
+    return true;
+}
+
+// Helper: Log customer approval action
+function logCustomerApproval(req, customerId, email_id, developerId) {
+    try {
+        const data_to_log = {
+            correlation_id: correlator.getId(),
+            token_id: req.token_data.token_id,
+            account_id: req.token_data.account_id,
+            user_type: 1,
+            user_id: req.token_data.admin_id,
+            narration: ' Customer approved by admin user manually. Customer email = ' + email_id,
+            query: JSON.stringify({ customer_id: customerId, is_approved: 1, developer_id: developerId }),
+            date_time: db.get_ist_current_date(),
+        };
+        action_logger.info(JSON.stringify(data_to_log));
+    } catch (_) { }
+}
+
+// Helper: Get Apigee error message
+function getApigeeErrorMessage(responseData) {
+    if (responseData?.error?.status === 'ABORTED' && responseData?.error?.code === 409) {
+        return 'Apigee response : ' + responseData?.error?.message;
+    }
+    if (responseData?.error?.message?.length > 0) {
+        return 'Apigee response : ' + responseData?.error?.message;
+    }
+    return "Unable to approve, Please try again.";
+}
+
 const customer_approve = async (req, res, next) => {
     const { customer_id } = req.body;
     const { CstCustomer } = db.models;
     try {
-        let _customer_id = customer_id && validator.isNumeric(customer_id.toString()) ? parseInt(customer_id) : 0;
+        const _customer_id = customer_id && validator.isNumeric(customer_id.toString()) ? parseInt(customer_id) : 0;
 
         const row1 = await CstCustomer.findOne({
-            where: {
-                customer_id: _customer_id,
-                is_deleted: false
-            },
+            where: { customer_id: _customer_id, is_deleted: false },
             attributes: ['customer_id', 'is_approved', 'first_name', 'last_name', 'email_id', 'user_name', 'company_name']
         });
 
@@ -293,84 +361,25 @@ const customer_approve = async (req, res, next) => {
         if (row1.is_approved > 0) {
             return res.status(200).json(success(false, res.statusCode, "Customer is already approved.", null));
         }
-        if (row1.first_name.length > 0 && row1.last_name.length > 0 && row1.email_id.length > 0) {
-            const first_name = row1.first_name;
-            const last_name = row1.last_name;
-            const email_id = row1.email_id;
-            const product_URL = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/developers`;
-            const data = {
-                firstName: first_name,
-                lastName: last_name,
-                userName: email_id,
-                email: email_id
-            };
-            const apigeeAuth = await db.get_apigee_token();
-            const response = await fetch(product_URL, {
-                method: "POST",
-                headers: { Authorization: `Bearer ${apigeeAuth}`, "Content-Type": "application/json", },
-                body: JSON.stringify(data),
-            });
-            const responseData = await response.json();
-            if (responseData?.developerId) {
-                const developer_id = responseData.developerId;
-                const approval_response = JSON.stringify(responseData);
 
-                const [affectedRows] = await CstCustomer.update(
-                    {
-                        is_approved: 1,
-                        approved_date: db.get_ist_current_date(),
-                        developer_id: developer_id,
-                        approval_response: approval_response,
-                        approved_by: req.token_data.account_id
-                    },
-                    {
-                        where: { customer_id: _customer_id }
-                    }
-                );
-
-                if (affectedRows > 0) {
-                    try {
-                        const _ad_query = `INSERT INTO customer_data(customer_id, first_name, last_name, email_id,developer_id, company_name) VALUES (?, ?, ?, ?, ?, ?)`;
-                        const _replacementsad = [_customer_id, first_name, last_name, email_id, developer_id, row1.company_name]
-                        await db.sequelize2.query(_ad_query, { replacements: _replacementsad, type: QueryTypes.INSERT });
-
-                    } catch (_err) { _logger.error(_err.stack); }
-                    await send_approved_email(_customer_id);
-
-                    try {
-                        let data_to_log = {
-                            correlation_id: correlator.getId(),
-                            token_id: req.token_data.token_id,
-                            account_id: req.token_data.account_id,
-                            user_type: 1,
-                            user_id: req.token_data.admin_id,
-                            narration: ' Customer approved by admin user manually. Customer email = ' + row1.email_id,
-                            query: JSON.stringify({
-                                customer_id: _customer_id,
-                                is_approved: 1,
-                                developer_id: developer_id
-                            }),
-                            date_time: db.get_ist_current_date(),
-                        }
-                        action_logger.info(JSON.stringify(data_to_log));
-                    } catch (_) { }
-
-                    return res.status(200).json(success(true, res.statusCode, "Customer approved successfully.", null));
-                } else {
-                    return res.status(200).json(success(false, res.statusCode, "Unable to approve, Please try again.", null));
-                }
-            }
-            if (responseData?.error?.status === 'ABORTED' && responseData?.error?.code === 409) {
-                return res.status(200).json(success(false, res.statusCode, 'Apigee response : ' + responseData?.error?.message, null));
-            }
-            if (responseData?.error?.message?.length > 0) {
-                return res.status(200).json(success(false, res.statusCode, "Apigee response : " + responseData?.error?.message, null));
-            }
-            return res.status(200).json(success(false, res.statusCode, "Unable to approve, Please try again.", null));
-
-        } else {
+        const hasRequiredDetails = row1.first_name?.length > 0 && row1.last_name?.length > 0 && row1.email_id?.length > 0;
+        if (!hasRequiredDetails) {
             return res.status(200).json(success(false, res.statusCode, "Unable to approve, details not available.", null));
         }
+
+        const responseData = await createApigeeDeveloper(row1);
+
+        if (!responseData?.developerId) {
+            return res.status(200).json(success(false, res.statusCode, getApigeeErrorMessage(responseData), null));
+        }
+
+        const approved = await handleApprovalSuccess(req, _customer_id, row1, responseData.developerId, responseData);
+
+        if (approved) {
+            return res.status(200).json(success(true, res.statusCode, "Customer approved successfully.", null));
+        }
+        return res.status(200).json(success(false, res.statusCode, "Unable to approve, Please try again.", null));
+
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));

@@ -146,7 +146,7 @@ const app_req_approved = async (req, res, next) => {
         const { CstAppMast, CstCustomer, AdmUser, Product, CstAppProduct } = getModels();
         let _page_no = page_no && validator.isNumeric(page_no.toString()) ? parseInt(page_no) : 0; if (_page_no <= 0) { _page_no = 1; }
         let _search_text = search_text && search_text.length > 0 ? search_text : "";
-        let _in_live = false; if (in_live && in_live == true) { _in_live = true; } else { _in_live = false; }
+        const _in_live = in_live === true;
         const offset = (_page_no - 1) * process.env.PAGINATION_SIZE;
 
         const [is_admin, is_checker, is_maker] = await commonModule.getUserRoles(req);
@@ -259,7 +259,7 @@ const app_req_rejected = async (req, res, next) => {
         const { CstAppMast, CstCustomer, AdmUser, Product, CstAppProduct } = getModels();
         let _page_no = page_no && validator.isNumeric(page_no.toString()) ? parseInt(page_no) : 0; if (_page_no <= 0) { _page_no = 1; }
         let _search_text = search_text && search_text.length > 0 ? search_text : "";
-        let _in_live = false; if (in_live && in_live == true) { _in_live = true; } else { _in_live = false; }
+        const _in_live = in_live === true;
         const offset = (_page_no - 1) * process.env.PAGINATION_SIZE;
 
         const [is_admin, is_checker, is_maker] = await commonModule.getUserRoles(req);

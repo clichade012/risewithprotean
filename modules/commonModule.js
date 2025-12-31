@@ -1,4 +1,3 @@
-import { logger as _logger } from '../logger/winston.js';
 import db from '../database/db_helper.js';
 import { QueryTypes } from 'sequelize';
 

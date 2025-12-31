@@ -1,6 +1,6 @@
-import { logger as _logger, action_logger } from '../logger/winston.js';
+import { logger as _logger } from '../logger/winston.js';
 import db from '../database/db_helper.js';
-import { Sequelize, QueryTypes, where } from 'sequelize';
+import { Sequelize } from 'sequelize';
 import { success } from "../model/responseModel.js";
 import validator from 'validator';
 import * as apigeeService from "../services/apigeeService.js";
@@ -107,7 +107,7 @@ const apigee_api_request = async (req, res, next) => {
                         transaction_type: 2
                     }
                 )
-                const credit_id = _replacements2.credit_id;
+                // const credit_id = _replacements2.credit_id;
                 // const _query1 = `INSERT INTO cst_credits(customer_id, credits, added_by, added_date, description,transaction_type) VALUES (?, ?, ?, ?, ?, ?)RETURNING "credit_id"`;
                 // const _replacements2 = [req.token_data.customer_id, 1, req.token_data.account_id, db.get_ist_current_date(), description, 2];
                 // const [rowOut] = await db.sequelize.query(_query1, { replacements: _replacements2, type: QueryTypes.INSERT });
@@ -149,13 +149,13 @@ const apigee_api_request = async (req, res, next) => {
                 }
                 const request_body = JSON.stringify(json_body);
                 const response_body = JSON.stringify(res_data);
-                const _query2 = `INSERT INTO cst_credits_used(customer_id, product_id, proxy_id, endpoint_id, added_date, api_url, request_body, response_body)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING "credit_used_id"`;
+                // const _query2 = `INSERT INTO cst_credits_used(customer_id, product_id, proxy_id, endpoint_id, added_date, api_url, request_body, response_body)
+                // VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING "credit_used_id"`;
                 // const [row2] = await db.sequelize.query(_query2, {
                 //     replacements: [req.token_data.customer_id, row1[0].product_id, row1[0].proxy_id, endpoint_id, db.get_ist_current_date(), endpoint_url, request_body, response_body], type: QueryTypes.INSERT
                 // });
 
-                const row2 = await CstCreditsUsed.create(
+                 await CstCreditsUsed.create(
                     {
                         customer_id: req.token_data.customer_id,
                         product_id: row1.Proxies.product_id,

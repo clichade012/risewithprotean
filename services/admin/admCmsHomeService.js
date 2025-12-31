@@ -1,7 +1,6 @@
 import { logger as _logger, action_logger } from '../../logger/winston.js';
 import db from '../../database/db_helper.js';
 import { success } from "../../model/responseModel.js";
-import { QueryTypes } from 'sequelize';
 import validator from 'validator';
 import correlator from 'express-correlation-id';
 import redisDB from '../../database/redis_cache.js';

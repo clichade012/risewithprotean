@@ -2332,7 +2332,7 @@ const dropdown_products = async (req, res, next) => {
 };
 
 const apigee_product_rate_add = async (req, res, next) => {
-    const { product_id, ratePlanDetails, billingDetails, pricingDetails, revenueDetails } = req.body;
+    const { product_id } = req.body;
 
     try {
         let _product_id = product_id && validator.isNumeric(product_id.toString()) ? parseInt(product_id) : 0;

@@ -16,7 +16,7 @@ const getModels = () => db.models;
 const app_product_rate_add = async (req, res, next) => {
     const { app_id, app_product_rate_data } = req.body;
     try {
-        const { AppProductRate, CstAppMast, CstCustomer, AdmUser, Product, CstAppProduct } = getModels();
+        const { AppProductRate, CstAppMast, CstCustomer} = getModels();
         let _app_id = app_id && validator.isNumeric(app_id.toString()) ? parseInt(app_id) : 0;
         if (!app_product_rate_data || app_product_rate_data.length <= 0) {
             return res.status(200).json(success(false, res.statusCode, "Please enter product rate value.", null));
@@ -151,7 +151,7 @@ const app_product_rate_add = async (req, res, next) => {
 const app_product_rate_pending_list = async (req, res, next) => {
     const { page_no, search_text } = req.body;
     try {
-        const { AppProductRate, CstAppMast, CstCustomer, AdmUser, Product, CstAppProduct } = getModels();
+        const { AppProductRate, CstAppMast,  AdmUser, Product, CstAppProduct } = getModels();
         let _page_no = page_no && validator.isNumeric(page_no.toString()) ? parseInt(page_no) : 0; if (_page_no <= 0) { _page_no = 1; }
         let _search_text = search_text && search_text.length > 0 ? search_text : "";
         const offset = (_page_no - 1) * process.env.PAGINATION_SIZE;
@@ -254,7 +254,7 @@ const app_product_rate_pending_list = async (req, res, next) => {
 const app_product_rate_approve_list = async (req, res, next) => {
     const { page_no, search_text } = req.body;
     try {
-        const { AppProductRate, CstAppMast, CstCustomer, AdmUser, Product, CstAppProduct } = getModels();
+        const { AppProductRate, CstAppMast,  AdmUser, Product, CstAppProduct } = getModels();
         let _page_no = page_no && validator.isNumeric(page_no.toString()) ? parseInt(page_no) : 0; if (_page_no <= 0) { _page_no = 1; }
         let _search_text = search_text && search_text.length > 0 ? search_text : "";
         const offset = (_page_no - 1) * process.env.PAGINATION_SIZE;
@@ -371,7 +371,7 @@ const app_product_rate_approve_list = async (req, res, next) => {
 const app_product_rate_rejected_list = async (req, res, next) => {
     const { page_no, search_text } = req.body;
     try {
-        const { AppProductRate, CstAppMast, CstCustomer, AdmUser, Product, CstAppProduct } = getModels();
+        const { AppProductRate, CstAppMast,  AdmUser, Product, CstAppProduct } = getModels();
         let _page_no = page_no && validator.isNumeric(page_no.toString()) ? parseInt(page_no) : 0; if (_page_no <= 0) { _page_no = 1; }
         let _search_text = search_text && search_text.length > 0 ? search_text : "";
         const offset = (_page_no - 1) * process.env.PAGINATION_SIZE;
@@ -487,7 +487,7 @@ const app_product_rate_rejected_list = async (req, res, next) => {
 const app_product_rate_reject = async (req, res, next) => {
     const { ap_rate_id, app_id, remark } = req.body;
     try {
-        const { AppProductRate, CstAppMast, CstCustomer, AdmUser, Product, CstAppProduct } = getModels();
+        const { AppProductRate, CstAppMast } = getModels();
         let _ap_rate_id = ap_rate_id && validator.isNumeric(ap_rate_id.toString()) ? parseInt(ap_rate_id) : 0;
         let _app_id = app_id && validator.isNumeric(app_id.toString()) ? parseInt(app_id) : 0;
         if (!remark || remark.length <= 0) {
@@ -555,7 +555,7 @@ const app_product_rate_reject = async (req, res, next) => {
 const app_product_rate_approve = async (req, res, next) => {
     const { ap_rate_id, app_id, remark } = req.body;
     try {
-        const { AppProductRate, CstAppMast, CstCustomer, AdmUser, Product, CstAppProduct } = getModels();
+        const { AppProductRate, CstAppMast, CstCustomer} = getModels();
         let _ap_rate_id = ap_rate_id && validator.isNumeric(ap_rate_id.toString()) ? parseInt(ap_rate_id) : 0;
         let _app_id = app_id && validator.isNumeric(app_id.toString()) ? parseInt(app_id) : 0;
 

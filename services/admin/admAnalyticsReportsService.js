@@ -4,7 +4,6 @@ import { QueryTypes, Op, fn, col } from 'sequelize';
 import { success } from "../../model/responseModel.js";
 import dateFormat from 'date-format';
 import validator from 'validator';
-import { randomUUID } from 'crypto';
 import excel from 'exceljs';
 import correlator from 'express-correlation-id';
 import { STATUS_TYPE, EmailTemplates } from "../../model/enumModel.js";
@@ -267,92 +266,111 @@ const HEADERS = {
     ],
 };
 
+// Helper: Build Excel export query with conditions
+function buildExcelExportQuery(tableName, params) {
+    const { email_id, search_text, product_id, from_date, upto_date, _from_date, _upto_date, currentPage, pageSize } = params;
+
+    let query = `SELECT ROW_NUMBER() OVER(ORDER BY ax_created_time DESC) AS sr_no,
+        id, organization, environment, apiproxy, request_uri, proxy, response_status_code,
+        is_error, client_received_start_timestamp, client_received_end_timestamp, target_sent_start_timestamp, target_sent_end_timestamp,
+        target_received_start_timestamp, target_received_end_timestamp, client_sent_start_timestamp, client_sent_end_timestamp, client_ip,
+        client_id, REPLACE(developer, 'apigeeprotean@@@', '') AS developer, developer_app, api_product, target, target_url,
+        target_host, proxy_client_ip, target_basepath, target_ip, request_path, developer_email, total_response_time, request_processing_latency,
+        response_processing_latency, target_response_time, target_response_code, ax_created_time, dc_api_product, dc_api_resource,
+        dc_developer_app, dc_developer_app_display_name, dc_developer_email, dc_api_name, dc_api_request_id, dc_case_id,
+        dc_req_path, dc_karzastauscode AS karza_status_code, dc_backendstatusreason AS response_description,
+        dc_signzyresponseid AS id_field_from_signzy_response, x_apigee_mintng_price_multiplier, x_apigee_mintng_rate,
+        x_apigee_mintng_rate::FLOAT / NULLIF(x_apigee_mintng_price_multiplier::FLOAT, 0) AS rate_plan_rate, dc_billing_type, dc_programid FROM ${tableName}`;
+
+    const conditions = [];
+    const replacements = { page_size: pageSize, page_no: currentPage };
+
+    if (email_id?.length > 0) {
+        conditions.push('developer_email = :email_id');
+        replacements.email_id = email_id;
+    }
+    if (search_text?.length > 0) {
+        conditions.push('target_host ILIKE :search_text');
+        replacements.search_text = `%${search_text}%`;
+    }
+    if (product_id?.length > 0) {
+        conditions.push('api_product = :product_id');
+        replacements.product_id = product_id;
+    }
+    if (from_date) {
+        conditions.push('ax_created_time >= :from_date');
+        replacements.from_date = _from_date;
+    }
+    if (upto_date) {
+        conditions.push('ax_created_time <= :upto_date');
+        replacements.upto_date = _upto_date;
+    }
+
+    if (conditions.length > 0) {
+        query += ' WHERE ' + conditions.join(' AND ');
+    }
+    query += ' ORDER BY ax_created_time DESC LIMIT :page_size OFFSET ((:page_no - 1) * :page_size)';
+
+    return { query, replacements };
+}
+
+// Helper: Process rows and manage worksheet sheets
+function processExcelRows(pageData, context) {
+    const { worksheet, workbook, role_name, maxRowsPerSheet } = context;
+    let { currentRow, sheetIndex } = context;
+    let currentWorksheet = worksheet;
+
+    const addHeaders = (ws) => ws.addRow(HEADERS[role_name] || HEADERS.Default).commit();
+
+    for (const row of pageData) {
+        if (currentRow > maxRowsPerSheet) {
+            currentWorksheet.commit();
+            sheetIndex++;
+            currentWorksheet = workbook.addWorksheet(`Sheet ${sheetIndex}`);
+            addHeaders(currentWorksheet);
+            currentRow = 1;
+        }
+        try {
+            currentWorksheet.addRow(formatRowData(row, role_name)).commit();
+            currentRow++;
+        } catch (err) {
+            console.log("Error adding row to worksheet:", err);
+        }
+    }
+
+    return { worksheet: currentWorksheet, currentRow, sheetIndex };
+}
+
 const generateExcelFile = async (req, { filePath, requestId, _type, role_name, _from_date, _upto_date, email_id }) => {
     const { search_text, product_id, from_date, upto_date } = req.body;
-    // const generateExcelFile = async (req, filePath, requestId, _type, role_name, _from_date, _upto_date, email_id) => {
-    //     const { search_text, product_id, from_date, upto_date } = req.body;
     try {
         console.log("---------generateExcelFile-----------", filePath, requestId, _type, role_name, _from_date, _upto_date, email_id);
 
-        let _search_text = search_text && search_text.length > 0 ? search_text : "";
+        const _search_text = search_text?.length > 0 ? search_text : "";
         const workbook = new excel.stream.xlsx.WorkbookWriter({ filename: filePath });
-        let worksheet = workbook.addWorksheet('Sheet 1');
-        let currentPage = 1; let hasMoreData = true; const pageSize = 20000;
         const table_name = _type == 1 ? 'apigee_logs_prod' : 'apigee_logs';
-        const maxRowsPerSheet = 1048570; // Excel row limit per sheet
-        let sheetIndex = 1; let currentRow = 0;
-        const addHeaders = (ws) => { ws.addRow(HEADERS[role_name] || HEADERS.Default).commit(); };
-        addHeaders(worksheet);
-        while (hasMoreData) {
-            let _query3 = `SELECT ROW_NUMBER() OVER(ORDER BY ax_created_time DESC) AS sr_no, 
-        id, organization, environment, apiproxy, request_uri, proxy, response_status_code,
-        is_error, client_received_start_timestamp, client_received_end_timestamp, target_sent_start_timestamp, target_sent_end_timestamp, 
-        target_received_start_timestamp, target_received_end_timestamp, client_sent_start_timestamp, client_sent_end_timestamp, client_ip, 
-        client_id, REPLACE(developer, 'apigeeprotean@@@', '') AS developer, developer_app, api_product, target, target_url, 
-        target_host, proxy_client_ip, target_basepath, target_ip, request_path, developer_email, total_response_time, request_processing_latency,
-        response_processing_latency, target_response_time, target_response_code, ax_created_time, dc_api_product, dc_api_resource, 
-        dc_developer_app, dc_developer_app_display_name, dc_developer_email, dc_api_name, dc_api_request_id, dc_case_id, 
-        dc_req_path, dc_karzastauscode AS karza_status_code, dc_backendstatusreason AS response_description,
-        dc_signzyresponseid AS id_field_from_signzy_response, x_apigee_mintng_price_multiplier, x_apigee_mintng_rate,
-	    x_apigee_mintng_rate::FLOAT / NULLIF(x_apigee_mintng_price_multiplier::FLOAT, 0) AS rate_plan_rate, dc_billing_type, dc_programid FROM ${table_name}`;
-            const conditions = [];
-            const replacements = {
-                page_size: pageSize,
-                page_no: currentPage,
-            };
-            if (email_id && email_id.length > 0) {
-                conditions.push(` developer_email = :email_id`);
-                replacements.email_id = email_id;
-            }
-            if (_search_text && _search_text.length > 0) {
-                conditions.push(` target_host ILIKE :search_text`);
-                replacements.search_text = `%${_search_text}%`;
-            }
-            if (product_id && product_id.length > 0) {
-                conditions.push(` api_product = :product_id `);
-                replacements.product_id = product_id;
-            }
+        const pageSize = 20000;
+        const maxRowsPerSheet = 1048570;
 
-            if (from_date) {
-                conditions.push(` ax_created_time >= :from_date`);
-                replacements.from_date = _from_date;
-            }
+        let worksheet = workbook.addWorksheet('Sheet 1');
+        worksheet.addRow(HEADERS[role_name] || HEADERS.Default).commit();
 
-            if (upto_date) {
-                conditions.push(` ax_created_time <= :upto_date`);
-                replacements.upto_date = _upto_date;
-            }
+        let currentPage = 1;
+        let context = { worksheet, workbook, role_name, maxRowsPerSheet, currentRow: 0, sheetIndex: 1 };
 
-            if (conditions.length > 0) {
-                _query3 += ' WHERE ' + conditions.join(' AND ');
-            }
+        while (true) {
+            const { query, replacements } = buildExcelExportQuery(table_name, {
+                email_id, search_text: _search_text, product_id, from_date, upto_date, _from_date, _upto_date, currentPage, pageSize
+            });
 
-            _query3 += ` ORDER BY ax_created_time DESC LIMIT :page_size OFFSET ((:page_no - 1) * :page_size)`;
+            const pageData = await db.sequelize2.query(query, { replacements, type: QueryTypes.SELECT, raw: true });
 
-            const pageData = await db.sequelize2.query(_query3, { replacements, type: QueryTypes.SELECT, raw: true });
-            if (pageData && pageData.length > 0) {
-                pageData.forEach(row => {
-                    if (currentRow > maxRowsPerSheet) {
-                        worksheet.commit(); // Finalize the current sheet
-                        sheetIndex++;
-                        worksheet = workbook.addWorksheet(`Sheet ${sheetIndex}`);
-                        addHeaders(worksheet);
-                        currentRow = 1; // Reset the row counter for the new sheet
-                    }
-                    const rowData = formatRowData(row, role_name);
+            if (!pageData?.length) break;
 
-                    try {
-                        worksheet.addRow(rowData).commit();
-                        currentRow++;
-                    } catch (err) {
-                        console.log("Error adding row to worksheet:", err);
-                    }
-                });
-                currentPage++;
-            } else {
-                hasMoreData = false;
-            }
+            context = processExcelRows(pageData, context);
+            currentPage++;
         }
+
         await workbook.commit();
         await uploadToCloudStorage(filePath, requestId);
         console.log(`Excel file generated successfully: ${filePath}`);
@@ -439,82 +457,84 @@ async function getCustomerById(customerId) {
     return result || null;
 }
 
+// Helper: Parse numeric value with validation
+function parseNumericValue(value, defaultVal = 0) {
+    return value && validator.isNumeric(value.toString()) ? parseInt(value) : defaultVal;
+}
+
+// Helper: Validate date range for excel export
+function validateDateRange(from_date, upto_date) {
+    if (!from_date || from_date.length <= 0 || !validator.isDate(from_date)) {
+        return { valid: false, message: "Please select a valid from date." };
+    }
+    if (!upto_date || upto_date.length <= 0 || !validator.isDate(upto_date)) {
+        return { valid: false, message: "Please select a valid upto date." };
+    }
+    const dateDifference = moment(upto_date).diff(moment(from_date), 'days');
+    if (dateDifference > 32) {
+        return { valid: false, message: "Date range should not be greater than 31 days." };
+    }
+    return { valid: true };
+}
+
+// Helper: Calculate previous date and format date ranges
+function calculateDateRanges(from_date, upto_date) {
+    const from_dateTime = '18:30:00.000 UTC';
+    const to_dateTime = '18:29:59.999 UTC';
+
+    let previousfrom_Date = '';
+    if (from_date) {
+        const date = new Date(from_date);
+        date.setDate(date.getDate() - 1);
+        previousfrom_Date = date.toISOString().split('T')[0];
+    }
+
+    return {
+        _from_date: previousfrom_Date + ' ' + from_dateTime,
+        _upto_date: upto_date + ' ' + to_dateTime
+    };
+}
+
 const analytics_reports_generate_excel = async (req, res, next) => {
     const { page_no, customer_id, product_id, from_date, upto_date, type } = req.body;
     try {
-        let _customer_id = customer_id && validator.isNumeric(customer_id.toString()) ? parseInt(customer_id) : 0;
-        let _page_no = page_no && validator.isNumeric(page_no.toString()) ? parseInt(page_no) : 0;
-        let _type = type && validator.isNumeric(type.toString()) ? parseInt(type) : 0;// 1 = prod and 2 = UAT
-        // let developerId = '';
-        let email_id = '';
-        let from_dateTime = '18:30:00.000 UTC';// this is utc format and it is fix time to get data in ist format  
-        let to_dateTime = '18:29:59.999 UTC';
-        let previousfrom_Date = '';
+        const _customer_id = parseNumericValue(customer_id);
+        const _page_no = parseNumericValue(page_no) || 1;
+        const _type = parseNumericValue(type) || 1; // 1 = prod and 2 = UAT
+
         const roleData = await getRoleByAdminId(req.token_data.admin_id);
-        let role_name = ""; if (roleData) { role_name = roleData.role_name; }
+        const role_name = roleData?.role_name || "";
+
         const customer = await getCustomerById(_customer_id);
-        if (customer) { email_id = customer.email_id; }
+        const email_id = customer?.email_id || '';
 
-        if (_customer_id <= 0 || (product_id && product_id.length <= 0)) {
-            if (!from_date || from_date.length <= 0 || !validator.isDate(from_date)) {
-                return res.status(200).json(success(false, res.statusCode, "Please select a valid from date.", null));
-            }
-
-            if (!upto_date || upto_date.length <= 0 || !validator.isDate(upto_date)) {
-                return res.status(200).json(success(false, res.statusCode, "Please select a valid upto date.", null));
-            }
-            const fromDateMoment = moment(from_date);
-            const uptoDateMoment = moment(upto_date);
-            const dateDifference = uptoDateMoment.diff(fromDateMoment, 'days');
-
-            if (dateDifference > 32) {
-                return res.status(200).json({ success: false, message: "Date range should not be greater than 31 days." });
+        // Validate date range if no customer or product filter
+        const requiresDateValidation = _customer_id <= 0 || (product_id && product_id.length <= 0);
+        if (requiresDateValidation) {
+            const dateValidation = validateDateRange(from_date, upto_date);
+            if (!dateValidation.valid) {
+                return res.status(200).json(success(false, res.statusCode, dateValidation.message, null));
             }
         }
 
-        if (from_date) {
-            let date = new Date(from_date);
-            date.setDate(date.getDate() - 1);
-            previousfrom_Date = date.toISOString().split('T')[0];
-        }
-
-        let _from_date = previousfrom_Date + ' ' + from_dateTime;
-        let _upto_date = upto_date + ' ' + to_dateTime;
-        if (_page_no <= 0) { _page_no = 1; } if (_type <= 0) { _type = 1; }
+        const { _from_date, _upto_date } = calculateDateRanges(from_date, upto_date);
         const table_name = _type == 1 ? 'apigee_logs_prod' : 'apigee_logs';
         console.log("------s-table_name-------------------", table_name);
 
-        const uuid = uuidv4();
-        const formattedDateTime = moment().format('YYYYMMDD_HHmmss');
-        const requestId = `${uuid}_${formattedDateTime}`;
-
+        const requestId = `${uuidv4()}_${moment().format('YYYYMMDD_HHmmss')}`;
         const file_id = await insertAnalyticsFileObject(req, requestId, from_date, upto_date);
+
         if (file_id === 0) {
             return res.status(200).json(success(false, res.statusCode, "Unable to insert request id, Please try again.", null));
         }
+
         const filePath = path.join(__dirname, `../../uploads/download_excel/${requestId}.xlsx`);
-
-        // Ensure the directory exists
         await fs.ensureDir(path.join(__dirname, '../../uploads/download_excel'));
-
         console.log("==============filePath=======================", filePath);
-        // generateExcelFile(req, filePath, requestId, _type, role_name, _from_date, _upto_date, email_id);
-       
-        generateExcelFile(
-            req,
-            {
-            filePath,
-            requestId,
-            _type: _type,
-            role_name: role_name,
-            _from_date: _from_date,
-            _upto_date: _upto_date,
-            email_id: email_id
-            }
-        );
 
-        let data = { request_id: requestId }
-        res.status(200).json(success(true, res.statusCode, "Excel generation started.", data));
+        generateExcelFile(req, { filePath, requestId, _type, role_name, _from_date, _upto_date, email_id });
+
+        res.status(200).json(success(true, res.statusCode, "Excel generation started.", { request_id: requestId }));
     } catch (err) {
         _logger.error(err.stack);
         console.log("----------err.stack---------------", err.stack);
@@ -886,145 +906,122 @@ async function fetchFYYearData(req, res, next) {
     }
 }
 
+// Helper: Convert row to Excel format with numeric defaults
+function formatRowForExcel(row) {
+    const numericFields = [
+        'wallets_amount', 'success_count', 'avg_success_rate', 'failure_count', 'avg_failure_rate',
+        'total_count', 'total_success_count_fy', 'avg_success_count_fy', 'total_failure_count_fy',
+        'avg_failure_count_fy', 'total_count_fy', 'prev_day_success_count', 'percent_increase',
+        'mtd_success_rate', 'week1_success_count', 'week2_success_count', 'week3_success_count',
+        'week4_success_count', 'week5_success_count'
+    ];
+
+    const result = {
+        developer_email: row.developer_email,
+        company_name: row.company_name,
+        mobile_no: row.mobile_no,
+        billing_type: row.billing_type
+    };
+
+    numericFields.forEach(field => {
+        result[field] = Number(row[field]) || 0;
+    });
+
+    return result;
+}
+
+// Helper: Generate HTML table row
+function generateHtmlTableRow(row) {
+    const tdLeft = (val) => `<td style="border: 1px solid white; padding: 8px; text-align: left;">${val}</td>`;
+    const tdRight = (val) => `<td style="border: 1px solid white; padding: 8px; text-align: right;">${val || 0}</td>`;
+
+    return `<tr>
+        ${tdLeft(row.developer_email)}${tdLeft(row.company_name)}${tdLeft(row.mobile_no)}${tdRight(row.billing_type)}
+        ${tdRight(row.wallets_amount)}${tdRight(row.success_count)}${tdRight(row.avg_success_rate)}
+        ${tdRight(row.failure_count)}${tdRight(row.avg_failure_rate)}${tdRight(row.total_count)}
+        ${tdRight(row.total_success_count_fy)}${tdRight(row.avg_success_count_fy)}${tdRight(row.total_failure_count_fy)}
+        ${tdRight(row.avg_failure_count_fy)}${tdRight(row.total_count_fy)}${tdRight(row.prev_day_success_count)}
+        ${tdRight(row.percent_increase)}${tdRight(row.mtd_success_rate)}${tdRight(row.week1_success_count)}
+        ${tdRight(row.week2_success_count)}${tdRight(row.week3_success_count)}${tdRight(row.week4_success_count)}
+        ${tdRight(row.week5_success_count)}
+    </tr>`;
+}
+
+// Helper: Calculate totals from merged data
+function calculateTotals(mergedData) {
+    const sumField = (field) => mergedData.reduce((sum, row) => sum + (Number(row[field]) || 0), 0);
+
+    return {
+        wallets_amount: sumField('wallets_amount'),
+        success_count: sumField('success_count'),
+        failure_count: sumField('failure_count'),
+        total_count: sumField('total_count'),
+        total_success_count_fy: sumField('total_success_count_fy'),
+        total_failure_count_fy: sumField('total_failure_count_fy'),
+        total_count_fy: sumField('total_count_fy'),
+        prev_day_success_count: sumField('prev_day_success_count'),
+        week1_success_count: sumField('week1_success_count'),
+        week2_success_count: sumField('week2_success_count'),
+        week3_success_count: sumField('week3_success_count'),
+        week4_success_count: sumField('week4_success_count'),
+        week5_success_count: sumField('week5_success_count')
+    };
+}
+
+// Helper: Generate HTML total row for email
+function generateHtmlTotalRow(totals) {
+    const tdEmpty = `<td style="border: 1px solid white; padding: 8px; text-align: left;"></td>`;
+    const tdRight = (val) => `<td style="border: 1px solid white; padding: 8px; text-align: right;">${val}</td>`;
+
+    return `<tr style="font-weight: bold; background-color: #301e1e;">
+        <td style="border: 1px solid white; padding: 8px; text-align: left;">TOTAL</td>
+        ${tdEmpty}${tdEmpty}${tdEmpty}
+        ${tdRight(totals.wallets_amount)}${tdRight(totals.success_count)}${tdEmpty}
+        ${tdRight(totals.failure_count)}${tdEmpty}${tdRight(totals.total_count)}
+        ${tdRight(totals.total_success_count_fy)}${tdEmpty}${tdRight(totals.total_failure_count_fy)}
+        ${tdEmpty}${tdRight(totals.total_count_fy)}${tdEmpty}${tdEmpty}${tdEmpty}
+        ${tdRight(totals.week1_success_count)}${tdRight(totals.week2_success_count)}
+        ${tdRight(totals.week3_success_count)}${tdRight(totals.week4_success_count)}
+        ${tdRight(totals.week5_success_count)}
+    </tr>`;
+}
+
 async function createAndSendExcelReport(finalData, fyFinalData) {
     try {
-
         const dataMap = buildMISDataMap(fyFinalData, finalData);
-
         const mergedData = Array.from(dataMap.values()).sort((a, b) => (Number(b.total_count) || 0) - (Number(a.total_count) || 0));
         console.log('Sorted mergedData:', mergedData);
 
-        // Step 2: Create Excel Workbook
+        // Create Excel Workbook
         const workbook = new excel.Workbook();
         const dailySheet = workbook.addWorksheet('Daily MIS Data');
         dailySheet.columns = getExcelColumns();
-        // Add Merged Data Rows
-        mergedData.forEach(row => {
-            dailySheet.addRow({
-                developer_email: row.developer_email,
-                company_name: row.company_name,
-                mobile_no: row.mobile_no,
-                billing_type: row.billing_type,
-                wallets_amount: Number(row.wallets_amount) || 0,
-                success_count: Number(row.success_count) || 0,
-                avg_success_rate: Number(row.avg_success_rate) || 0,
-                failure_count: Number(row.failure_count) || 0,
-                avg_failure_rate: Number(row.avg_failure_rate) || 0,
-                total_count: Number(row.total_count) || 0,
-                total_success_count_fy: Number(row.total_success_count_fy) || 0,
-                avg_success_count_fy: Number(row.avg_success_count_fy) || 0,
-                total_failure_count_fy: Number(row.total_failure_count_fy) || 0,
-                avg_failure_count_fy: Number(row.avg_failure_count_fy) || 0,
-                total_count_fy: Number(row.total_count_fy) || 0,
-                prev_day_success_count: Number(row.prev_day_success_count) || 0,
-                percent_increase: Number(row.percent_increase) || 0,
-                mtd_success_rate: Number(row.mtd_success_rate) || 0,
-                week1_success_count: Number(row.week1_success_count) || 0,
-                week2_success_count: Number(row.week2_success_count) || 0,
-                week3_success_count: Number(row.week3_success_count) || 0,
-                week4_success_count: Number(row.week4_success_count) || 0,
-                week5_success_count: Number(row.week5_success_count) || 0,
 
-            });
-        });
+        // Add data rows
+        mergedData.forEach(row => dailySheet.addRow(formatRowForExcel(row)));
 
-        const tableRows = mergedData.map(row => `
-            <tr>
-                <td style="border: 1px solid white; padding: 8px; text-align: left;">${row.developer_email}</td>
-                <td style="border: 1px solid white; padding: 8px; text-align: left;">${row.company_name}</td>
-                <td style="border: 1px solid white; padding: 8px; text-align: left;">${row.mobile_no}</td>
-                <td style="border: 1px solid white; padding: 8px; text-align: right;">${row.billing_type}</td>
-                <td style="border: 1px solid white; padding: 8px; text-align: right;">${row.wallets_amount || 0}</td>
-                <td style="border: 1px solid white; padding: 8px; text-align: right;">${row.success_count || 0}</td>
-                <td style="border: 1px solid white; padding: 8px; text-align: right;">${row.avg_success_rate || 0}</td>
-                <td style="border: 1px solid white; padding: 8px; text-align: right;">${row.failure_count || 0}</td>
-                <td style="border: 1px solid white; padding: 8px; text-align: right;">${row.avg_failure_rate || 0}</td>
-                <td style="border: 1px solid white; padding: 8px; text-align: right;">${row.total_count || 0}</td>
-                <td style="border: 1px solid white; padding: 8px; text-align: right;">${row.total_success_count_fy || 0}</td>
-                <td style="border: 1px solid white; padding: 8px; text-align: right;">${row.avg_success_count_fy || 0}</td>
-                <td style="border: 1px solid white; padding: 8px; text-align: right;">${row.total_failure_count_fy || 0}</td>
-                <td style="border: 1px solid white; padding: 8px; text-align: right;">${row.avg_failure_count_fy || 0}</td>
-                <td style="border: 1px solid white; padding: 8px; text-align: right;">${row.total_count_fy || 0}</td>
-                <td style="border: 1px solid white; padding: 8px; text-align: right;">${row.prev_day_success_count || 0}</td>
-                <td style="border: 1px solid white; padding: 8px; text-align: right;">${row.percent_increase || 0}</td>
-                <td style="border: 1px solid white; padding: 8px; text-align: right;">${row.mtd_success_rate || 0}</td>
-                <td style="border: 1px solid white; padding: 8px; text-align: right;">${row.week1_success_count || 0}</td>
-                <td style="border: 1px solid white; padding: 8px; text-align: right;">${row.week2_success_count || 0}</td>
-                <td style="border: 1px solid white; padding: 8px; text-align: right;">${row.week3_success_count || 0}</td>
-                <td style="border: 1px solid white; padding: 8px; text-align: right;">${row.week4_success_count || 0}</td>
-                <td style="border: 1px solid white; padding: 8px; text-align: right;">${row.week5_success_count || 0}</td>
-            </tr>
-        `).join('');
+        // Calculate totals and generate HTML
+        const totals = calculateTotals(mergedData);
+        const tableRows = mergedData.map(generateHtmlTableRow).join('');
+        const fullTableRows = tableRows + generateHtmlTotalRow(totals);
 
-        const totalRowEmail = `<tr style="font-weight: bold; background-color: #301e1e;">
-        <td style="border: 1px solid white; padding: 8px; text-align: left;">TOTAL</td>
-        <td style="border: 1px solid white; padding: 8px; text-align: left;"></td>
-        <td style="border: 1px solid white; padding: 8px; text-align: left;"></td>
-        <td style="border: 1px solid white; padding: 8px; text-align: left;"></td>
-        <td style="border: 1px solid white; padding: 8px; text-align: right;">${mergedData.reduce((sum, row) => sum + (Number(row.wallets_amount) || 0), 0)}</td>
-        <td style="border: 1px solid white; padding: 8px; text-align: right;">${mergedData.reduce((sum, row) => sum + (Number(row.success_count) || 0), 0)}</td>
-        <td style="border: 1px solid white; padding: 8px; text-align: left;"></td>
-        <td style="border: 1px solid white; padding: 8px; text-align: right;">${mergedData.reduce((sum, row) => sum + (Number(row.failure_count) || 0), 0)}</td>
-        <td style="border: 1px solid white; padding: 8px; text-align: left;"></td>
-        <td style="border: 1px solid white; padding: 8px; text-align: right;">${mergedData.reduce((sum, row) => sum + (Number(row.total_count) || 0), 0)}</td>
-        <td style="border: 1px solid white; padding: 8px; text-align: right;">${mergedData.reduce((sum, row) => sum + (Number(row.total_success_count_fy) || 0), 0)}</td>
-        <td style="border: 1px solid white; padding: 8px; text-align: left;"></td>
-        <td style="border: 1px solid white; padding: 8px; text-align: right;">${mergedData.reduce((sum, row) => sum + (Number(row.total_failure_count_fy) || 0), 0)}</td>
-        <td style="border: 1px solid white; padding: 8px; text-align: left;"></td>
-        <td style="border: 1px solid white; padding: 8px; text-align: right;">${mergedData.reduce((sum, row) => sum + (Number(row.total_count_fy) || 0), 0)}</td>
-        <td style="border: 1px solid white; padding: 8px; text-align: left;"></td>
-        <td style="border: 1px solid white; padding: 8px; text-align: left;"></td>
-        <td style="border: 1px solid white; padding: 8px; text-align: left;"></td>
-        <td style="border: 1px solid white; padding: 8px; text-align: right;">${mergedData.reduce((sum, row) => sum + (Number(row.week1_success_count) || 0), 0)}</td>
-        <td style="border: 1px solid white; padding: 8px; text-align: right;">${mergedData.reduce((sum, row) => sum + (Number(row.week2_success_count) || 0), 0)}</td>
-        <td style="border: 1px solid white; padding: 8px; text-align: right;">${mergedData.reduce((sum, row) => sum + (Number(row.week3_success_count) || 0), 0)}</td>
-        <td style="border: 1px solid white; padding: 8px; text-align: right;">${mergedData.reduce((sum, row) => sum + (Number(row.week4_success_count) || 0), 0)}</td>
-        <td style="border: 1px solid white; padding: 8px; text-align: right;">${mergedData.reduce((sum, row) => sum + (Number(row.week5_success_count) || 0), 0)}</td> 
-        </tr>`;
-
-        const fullTableRows = tableRows + totalRowEmail;
-
+        // Add total row to Excel
         const totalRowData = {
-            developer_email: 'TOTAL', // Label for the total row
-            company_name: '',
-            mobile_no: '',
-            billing_type: '',
-            wallets_amount: mergedData.reduce((sum, row) => sum + (Number(row.wallets_amount) || 0), 0),
-            success_count: mergedData.reduce((sum, row) => sum + (Number(row.success_count) || 0), 0),
-            avg_success_rate: '',
-            failure_count: mergedData.reduce((sum, row) => sum + (Number(row.failure_count) || 0), 0),
-            avg_failure_rate: '',
-            total_count: mergedData.reduce((sum, row) => sum + (Number(row.total_count) || 0), 0),
-            total_success_count_fy: mergedData.reduce((sum, row) => sum + (Number(row.total_success_count_fy) || 0), 0),
-            avg_success_count_fy: '',
-            total_failure_count_fy: mergedData.reduce((sum, row) => sum + (Number(row.total_failure_count_fy) || 0), 0),
-            avg_failure_count_fy: '',
-            total_count_fy: mergedData.reduce((sum, row) => sum + (Number(row.total_count_fy) || 0), 0),
-            prev_day_success_count: mergedData.reduce((sum, row) => sum + (Number(row.prev_day_success_count) || 0), 0),
-            percent_increase: '',
-            mtd_success_rate: '',
-            week1_success_count: mergedData.reduce((sum, row) => sum + (Number(row.week1_success_count) || 0), 0),
-            week2_success_count: mergedData.reduce((sum, row) => sum + (Number(row.week2_success_count) || 0), 0),
-            week3_success_count: mergedData.reduce((sum, row) => sum + (Number(row.week3_success_count) || 0), 0),
-            week4_success_count: mergedData.reduce((sum, row) => sum + (Number(row.week4_success_count) || 0), 0),
-            week5_success_count: mergedData.reduce((sum, row) => sum + (Number(row.week5_success_count) || 0), 0),
-
+            developer_email: 'TOTAL', company_name: '', mobile_no: '', billing_type: '',
+            avg_success_rate: '', avg_failure_rate: '', avg_success_count_fy: '',
+            avg_failure_count_fy: '', percent_increase: '', mtd_success_rate: '',
+            ...totals
         };
-
-        // Add the total row at the end
         const totalRow = dailySheet.addRow(totalRowData);
-        // Apply bold formatting to the total row
         totalRow.eachCell((cell) => { cell.font = { bold: true }; });
-        // Step 3: Save Excel File
+
+        // Save and send
         const filePath = path.join(__dirname, 'API_Report.xlsx');
         await workbook.xlsx.writeFile(filePath);
         console.log('Excel file created successfully at ' + filePath);
+
         const status = await sendDailyMISMailer(filePath, fullTableRows);
-        if (status === 1) {
-            console.log("MIS mail sent successfully ✅");
-        } else {
-            console.log("Failed with status:", status);
-        }
+        console.log(status === 1 ? "MIS mail sent successfully ✅" : `Failed with status: ${status}`);
     } catch (error) {
         console.log('Error in creating or sending the email: ', error);
         return -5;
@@ -1135,71 +1132,76 @@ function buildMISDataMap(fyFinalData, finalData) {
     return dataMap;
 }
 
+// Helper function to prepare email content
+function prepareEmailContent(template, fullTableRows) {
+    const now = new Date();
+    const yesterdayDate = new Date(now);
+    yesterdayDate.setDate(now.getDate() - 1);
+    const formattedDate = yesterdayDate.toISOString().split('T')[0];
+
+    let subject = template.subject || "";
+    let body_text = template.body_text || "";
+
+    subject = subject.replaceAll(process.env.EMAIL_TAG_DATE, formattedDate);
+    subject = subject.replaceAll(process.env.SITE_URL_TAG, process.env.FRONT_SITE_URL);
+    body_text = body_text.replaceAll(process.env.EMAIL_TAG_DATE, formattedDate);
+    body_text = body_text.replaceAll(process.env.SITE_URL_TAG, process.env.FRONT_SITE_URL);
+    body_text = body_text.replaceAll(process.env.MIS_TABLE_DATA, fullTableRows);
+
+    return { subject, body_text };
+}
+
+// Helper function to send email
+async function sendEmailWithAttachment(emailList, subject, body_text, filePath) {
+    const mailOptions = {
+        from: process.env.EMAIL_CONFIG_SENDER,
+        to: emailList,
+        subject: subject,
+        html: body_text,
+        attachments: [{ filename: 'API_Report.xlsx', path: filePath }]
+    };
+
+    try {
+        await emailTransporter.sendMail(mailOptions);
+        console.log('Email sent successfully to ' + emailList);
+        fs.unlinkSync(filePath);
+        return 1; /* Send */
+    } catch (err) {
+        _logger.error(err.stack);
+        return 0; /* Sending fail */
+    }
+}
+
 async function sendDailyMISMailer(filePath, fullTableRows) {
     const { BusinessEmail, EmailTemplate } = db.models;
-    // const _query = `SELECT email_id FROM business_email WHERE email_id In ('komal@prevoyancesolutions.com','komalchoudhari1507@gmail.com','minals@proteantech.in')`;
+
     const rows = await BusinessEmail.findAll({
         where: { is_enabled: true, type_id: { [Op.in]: [1, 3] } },
         attributes: ['email_id'],
         raw: true
     });
     const emailList = rows.map(row => row.email_id).join(', ');
-    if (emailList.length > 0) {
-        const rowT = await EmailTemplate.findAll({
-            where: { template_id: EmailTemplates.DAILY_MIS_AUTO_MAILER.value },
-            attributes: ['subject', 'body_text', 'is_enabled'],
-            raw: true
-        });
-        if (rowT && rowT.length > 0) {
-            if (rowT[0].is_enabled) {
-                const now = new Date();
-                const yesterdayDate = new Date(now); yesterdayDate.setDate(now.getDate() - 1);
-                const formattedDate = yesterdayDate.toISOString().split('T')[0];
-                let subject = rowT[0].subject && rowT[0].subject.length > 0 ? rowT[0].subject : "";
-                let body_text = rowT[0].body_text && rowT[0].body_text.length > 0 ? rowT[0].body_text : "";
 
-                subject = subject.replaceAll(process.env.EMAIL_TAG_DATE, formattedDate);
-                subject = subject.replaceAll(process.env.SITE_URL_TAG, process.env.FRONT_SITE_URL);
-                body_text = body_text.replaceAll(process.env.EMAIL_TAG_DATE, formattedDate);
-                body_text = body_text.replaceAll(process.env.SITE_URL_TAG, process.env.FRONT_SITE_URL);
-                body_text = body_text.replaceAll(process.env.MIS_TABLE_DATA, fullTableRows);
-
-                let mailOptions = {
-                    from: process.env.EMAIL_CONFIG_SENDER, // sender address
-                    to: emailList, // list of receivers
-                    subject: subject, // Subject line 
-                    html: body_text, // html body
-                    attachments: [
-                        {
-                            filename: 'API_Report.xlsx',
-                            path: filePath
-                        }
-                    ]
-                }
-                let is_success = false;
-                try {
-                    await emailTransporter.sendMail(mailOptions);
-                    is_success = true;
-                    console.log('Email sent successfully to ' + emailList);
-                    fs.unlinkSync(filePath);
-                } catch (err) {
-                    _logger.error(err.stack);
-                }
-                if (is_success) {
-                    return 1; /* Send*/
-
-                } else {
-                    return 0; /* Sending fail*/
-                }
-            } else {
-                return -4;      /*Templete is disabled*/
-            }
-        } else {
-            return -3;      /*Templete not found*/
-        }
-    } else {
-        return -2;     /*Unable to find business email*/
+    if (!emailList.length) {
+        return -2; /* Unable to find business email */
     }
+
+    const rowT = await EmailTemplate.findAll({
+        where: { template_id: EmailTemplates.DAILY_MIS_AUTO_MAILER.value },
+        attributes: ['subject', 'body_text', 'is_enabled'],
+        raw: true
+    });
+
+    if (!rowT || !rowT.length) {
+        return -3; /* Template not found */
+    }
+
+    if (!rowT[0].is_enabled) {
+        return -4; /* Template is disabled */
+    }
+
+    const { subject, body_text } = prepareEmailContent(rowT[0], fullTableRows);
+    return sendEmailWithAttachment(emailList, subject, body_text, filePath);
 }
 
 
