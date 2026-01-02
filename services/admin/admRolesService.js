@@ -7,126 +7,87 @@ import validator from 'validator';
 import { API_STATUS } from '../../model/enumModel.js';
 import correlator from 'express-correlation-id';
 
+// Helper: Parse numeric value with default
+const parseNumericWithDefault = (value, defaultVal = 0) => {
+    return value && validator.isNumeric(value.toString()) ? parseInt(value) : defaultVal;
+};
+
+// Helper: Log action to action_logger
+const logAction = (req, narration, query) => {
+    try {
+        action_logger.info(JSON.stringify({
+            correlation_id: correlator.getId(),
+            token_id: req.token_data.token_id,
+            account_id: req.token_data.account_id,
+            user_type: 1,
+            user_id: req.token_data.admin_id,
+            narration,
+            query: JSON.stringify(query),
+            date_time: db.get_ist_current_date(),
+        }));
+    } catch (_) { }
+};
 
 const role_set = async (req, res, next) => {
     const { role_id, role_name, role_level, checker_maker } = req.body;
     const { AdmRole } = db.models;
     try {
-        let is_editable = true;
-
-        let _role_id = role_id && validator.isNumeric(role_id.toString()) ? parseInt(role_id) : 0;
-        let _checker_maker = checker_maker && validator.isNumeric(checker_maker.toString()) ? parseInt(checker_maker) : 0;
-        let _role_level = role_level && validator.isNumeric(role_level.toString()) ? parseInt(role_level) : 0;
+        const _role_id = parseNumericWithDefault(role_id);
+        const _checker_maker = parseNumericWithDefault(checker_maker);
+        const _role_level = parseNumericWithDefault(role_level);
 
         if (!role_name || role_name.length <= 0) {
             return res.status(200).json(success(false, res.statusCode, "Please enter role name.", null));
         }
 
         // Check for duplicate role name
-        const row1 = await AdmRole.findOne({
-            where: {
-                role_id: { [Op.ne]: _role_id },
-                role_name: role_name,
-                is_deleted: false
-            },
+        const existingRole = await AdmRole.findOne({
+            where: { role_id: { [Op.ne]: _role_id }, role_name, is_deleted: false },
             attributes: ['role_id']
         });
-
-        if (row1) {
+        if (existingRole) {
             return res.status(200).json(success(false, res.statusCode, "Role name is already exists.", null));
         }
 
         // Check if role exists and is editable (for update)
-        const row2 = await AdmRole.findOne({
-            where: {
-                role_id: _role_id,
-                is_deleted: false
-            },
+        const currentRole = await AdmRole.findOne({
+            where: { role_id: _role_id, is_deleted: false },
             attributes: ['role_id', 'is_editable', 'role_name']
         });
-
-        if (row2 && !row2.is_editable) {
+        if (currentRole && !currentRole.is_editable) {
             return res.status(200).json(success(false, res.statusCode, "Administrator role can not edit.", null));
         }
 
+        // Update existing role
         if (_role_id > 0) {
-            // Update existing role
-            const [affectedRows] = await AdmRole.update(
-                {
-                    role_name: role_name,
-                    role_level: _role_level,
-                    checker_maker: _checker_maker,
-                    modify_by: req.token_data.account_id,
-                    is_editable: is_editable,
-                    modify_date: db.get_ist_current_date()
-                },
-                {
-                    where: { role_id: _role_id }
-                }
-            );
+            const [affectedRows] = await AdmRole.update({
+                role_name, role_level: _role_level, checker_maker: _checker_maker,
+                modify_by: req.token_data.account_id, is_editable: true, modify_date: db.get_ist_current_date()
+            }, { where: { role_id: _role_id } });
 
-            if (affectedRows > 0) {
-                try {
-                    let data_to_log = {
-                        correlation_id: correlator.getId(),
-                        token_id: req.token_data.token_id,
-                        account_id: req.token_data.account_id,
-                        user_type: 1,
-                        user_id: req.token_data.admin_id,
-                        narration: 'Role updated. Role name = ' + (row2.role_name == role_name ? role_name : row2.role_name + ' to ' + role_name),
-                        query: JSON.stringify({
-                            role_id: _role_id,
-                            role_name: role_name,
-                            role_level: _role_level
-                        }),
-                        date_time: db.get_ist_current_date(),
-                    }
-                    action_logger.info(JSON.stringify(data_to_log));
-                } catch (_) { }
-
-                return res.status(200).json(success(true, res.statusCode, "Updated successfully.", null));
-            } else {
+            if (affectedRows <= 0) {
                 return res.status(200).json(success(false, res.statusCode, "Unable to update, Please try again", null));
             }
-        } else {
-            // Create new role
-            const newRole = await AdmRole.create({
-                role_name: role_name,
-                role_level: _role_level,
-                is_enabled: true,
-                is_deleted: false,
-                added_by: req.token_data.account_id,
-                modify_by: req.token_data.account_id,
-                added_date: db.get_ist_current_date(),
-                modify_date: db.get_ist_current_date(),
-                is_editable: is_editable,
-                checker_maker: _checker_maker
-            });
 
-            const roleId = newRole?.role_id ?? 0;
-
-            if (roleId > 0) {
-                try {
-                    let data_to_log = {
-                        correlation_id: correlator.getId(),
-                        token_id: req.token_data.token_id,
-                        account_id: req.token_data.account_id,
-                        user_type: 1,
-                        user_id: req.token_data.admin_id,
-                        narration: 'New role added. Role name ' + role_name,
-                        query: JSON.stringify({
-                            role_name: role_name,
-                            role_level: _role_level
-                        }),
-                        date_time: db.get_ist_current_date(),
-                    }
-                    action_logger.info(JSON.stringify(data_to_log));
-                } catch (_) { }
-                return res.status(200).json(success(true, res.statusCode, "Saved successfully.", null));
-            } else {
-                return res.status(200).json(success(false, res.statusCode, "Unable to save, Please try again", null));
-            }
+            logAction(req, 'Role updated. Role name = ' + (currentRole.role_name == role_name ? role_name : currentRole.role_name + ' to ' + role_name),
+                { role_id: _role_id, role_name, role_level: _role_level });
+            return res.status(200).json(success(true, res.statusCode, "Updated successfully.", null));
         }
+
+        // Create new role
+        const newRole = await AdmRole.create({
+            role_name, role_level: _role_level, is_enabled: true, is_deleted: false,
+            added_by: req.token_data.account_id, modify_by: req.token_data.account_id,
+            added_date: db.get_ist_current_date(), modify_date: db.get_ist_current_date(),
+            is_editable: true, checker_maker: _checker_maker
+        });
+
+        if ((newRole?.role_id ?? 0) <= 0) {
+            return res.status(200).json(success(false, res.statusCode, "Unable to save, Please try again", null));
+        }
+
+        logAction(req, 'New role added. Role name ' + role_name, { role_name, role_level: _role_level });
+        return res.status(200).json(success(true, res.statusCode, "Saved successfully.", null));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
@@ -134,12 +95,12 @@ const role_set = async (req, res, next) => {
 };
 
 const role_list = async (req, res, next) => {
-    const { page_no, role_level, search_text } = req.body;
+    const { page_no, search_text } = req.body;
     const { AdmRole } = db.models;
     try {
-        let _page_no = page_no && validator.isNumeric(page_no.toString()) ? parseInt(page_no) : 0; if (_page_no <= 0) { _page_no = 1; }
-        let _search_text = search_text && search_text.length > 0 ? search_text : "";
-        // let _role_level = role_level && validator.isNumeric(role_level.toString()) ? parseInt(role_level) : 0;
+        let _page_no = parseNumericWithDefault(page_no);
+        if (_page_no <= 0) _page_no = 1;
+        const _search_text = search_text?.length > 0 ? search_text : "";
 
         // Build where clause with case-insensitive search
         const whereClause = {
@@ -154,39 +115,33 @@ const role_list = async (req, res, next) => {
             })
         };
 
-        // Count total records
         const total_record = await AdmRole.count({ where: whereClause });
+        const pageSize = parseInt(process.env.PAGINATION_SIZE);
 
-        // Get paginated list
-        const row1 = await AdmRole.findAll({
+        const rows = await AdmRole.findAll({
             where: whereClause,
             attributes: ['role_id', 'role_name', 'role_level', 'is_editable', 'checker_maker', 'is_enabled', 'added_date', 'modify_date'],
             order: [['role_id', 'DESC']],
-            limit: parseInt(process.env.PAGINATION_SIZE),
-            offset: (_page_no - 1) * parseInt(process.env.PAGINATION_SIZE),
+            limit: pageSize,
+            offset: (_page_no - 1) * pageSize,
             raw: true
         });
 
-        let list = [];
-        if (row1) {
-            for (let index = 0; index < row1.length; index++) {
-                const item = row1[index];
-                list.push({
-                    sr_no: (_page_no - 1) * parseInt(process.env.PAGINATION_SIZE) + index + 1,
-                    role_id: item.role_id,
-                    role_level: item.role_level,
-                    role_name: item.role_name,
-                    enabled: item.is_enabled,
-                    is_editable: item.is_editable,
-                    checker_maker: item.checker_maker,
-                    added_on: item.added_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(item.added_date)) : "",
-                    modify_on: item.modify_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(item.modify_date)) : "",
-                })
-            }
-        }
+        const list = (rows || []).map((item, index) => ({
+            sr_no: (_page_no - 1) * pageSize + index + 1,
+            role_id: item.role_id,
+            role_level: item.role_level,
+            role_name: item.role_name,
+            enabled: item.is_enabled,
+            is_editable: item.is_editable,
+            checker_maker: item.checker_maker,
+            added_on: item.added_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(item.added_date)) : "",
+            modify_on: item.modify_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(item.modify_date)) : "",
+        }));
+
         const results = {
             current_page: _page_no,
-            total_pages: Math.ceil(total_record / process.env.PAGINATION_SIZE),
+            total_pages: Math.ceil(total_record / pageSize),
             data: list,
         };
         return res.status(200).json(success(true, res.statusCode, "", results));
@@ -273,7 +228,7 @@ const role_toggle = async (req, res, next) => {
                     account_id: req.token_data.account_id,
                     user_type: 1,
                     user_id: req.token_data.admin_id,
-                    narration: 'Role ' + (row1.is_enabled == true ? 'disabled' : 'enabled') + '. Role name = ' + row1.role_name,
+                    narration: 'Role ' + (row1.is_enabled ? 'disabled' : 'enabled') + '. Role name = ' + row1.role_name,
                     query: JSON.stringify({
                         role_id: role_id,
                         is_enabled_toggled: true
@@ -460,104 +415,58 @@ const permission_update = async (req, res, next) => {
     const { role_id, permissions } = req.body;
     const { AdmRole, AdmRolePermission } = db.models;
     try {
-        let _role_id = role_id && validator.isNumeric(role_id.toString()) ? parseInt(role_id) : 0;
+        const _role_id = parseNumericWithDefault(role_id);
 
-        const row4 = await AdmRole.findOne({
-            where: {
-                role_id: _role_id,
-                is_deleted: false
-            },
+        const roleRow = await AdmRole.findOne({
+            where: { role_id: _role_id, is_deleted: false },
             raw: true
         });
 
-        if (row4) {
-            console.log(permissions);
-            for (const item of permissions) {
-                let _menu_id = item.menu_id && validator.isNumeric(item.menu_id.toString()) ? parseInt(item.menu_id) : 0;
-                let is_allowed = item.is_allowed || false;
-
-                const row1 = await AdmRolePermission.findOne({
-                    where: {
-                        role_id: _role_id,
-                        permission_id: _menu_id
-                    },
-                    attributes: ['permission_id'],
-                    raw: true
-                });
-
-                if (row1) {
-                    await AdmRolePermission.update(
-                        {
-                            is_allowed: is_allowed,
-                            modify_by: req.token_data.account_id,
-                            modify_date: db.get_ist_current_date()
-                        },
-                        {
-                            where: {
-                                role_id: _role_id,
-                                permission_id: _menu_id
-                            }
-                        }
-                    );
-                }
-                else {
-                    await AdmRolePermission.create({
-                        role_id: _role_id,
-                        permission_id: _menu_id,
-                        is_allowed: is_allowed,
-                        added_by: req.token_data.account_id,
-                        modify_by: req.token_data.account_id,
-                        added_date: db.get_ist_current_date(),
-                        modify_date: db.get_ist_current_date()
-                    });
-                }
-            }
-            let tempArray = [];
-            for (const item of permissions) {
-                let _menu_id = item.menu_id && validator.isNumeric(item.menu_id.toString()) ? parseInt(item.menu_id) : 0;
-                if (_menu_id > 0) {
-                    tempArray.push(_menu_id);
-                }
-            }
-            if (tempArray.length > 0) {
-                await AdmRolePermission.update(
-                    {
-                        is_allowed: false,
-                        modify_by: req.token_data.account_id,
-                        modify_date: db.get_ist_current_date()
-                    },
-                    {
-                        where: {
-                            role_id: _role_id,
-                            permission_id: { [Op.notIn]: tempArray }
-                        }
-                    }
-                );
-
-                try {
-                    let data_to_log = {
-                        correlation_id: correlator.getId(),
-                        token_id: req.token_data.token_id,
-                        account_id: req.token_data.account_id,
-                        user_type: 1,
-                        user_id: req.token_data.admin_id,
-                        narration: 'Role permission updated. Role name = ' + row4.role_name,
-                        query: JSON.stringify({
-                            role_id: _role_id,
-                            permissions_updated: tempArray
-                        }),
-                        date_time: db.get_ist_current_date(),
-                    }
-                    action_logger.info(JSON.stringify(data_to_log));
-                } catch (_) { }
-            }
-
-            return res.status(200).json(success(true, res.statusCode, "Permission saved successfully.", null));
-        }
-        else {
+        if (!roleRow) {
             return res.status(200).json(success(false, res.statusCode, "Role details not found, Please try again.", null));
         }
 
+        // Process each permission - upsert pattern
+        const validMenuIds = [];
+        for (const item of permissions) {
+            const _menu_id = parseNumericWithDefault(item.menu_id);
+            if (_menu_id <= 0) continue;
+
+            validMenuIds.push(_menu_id);
+            const is_allowed = item.is_allowed || false;
+
+            const existingPerm = await AdmRolePermission.findOne({
+                where: { role_id: _role_id, permission_id: _menu_id },
+                attributes: ['permission_id'],
+                raw: true
+            });
+
+            if (existingPerm) {
+                await AdmRolePermission.update(
+                    { is_allowed, modify_by: req.token_data.account_id, modify_date: db.get_ist_current_date() },
+                    { where: { role_id: _role_id, permission_id: _menu_id } }
+                );
+            } else {
+                await AdmRolePermission.create({
+                    role_id: _role_id, permission_id: _menu_id, is_allowed,
+                    added_by: req.token_data.account_id, modify_by: req.token_data.account_id,
+                    added_date: db.get_ist_current_date(), modify_date: db.get_ist_current_date()
+                });
+            }
+        }
+
+        // Disable permissions not in the list
+        if (validMenuIds.length > 0) {
+            await AdmRolePermission.update(
+                { is_allowed: false, modify_by: req.token_data.account_id, modify_date: db.get_ist_current_date() },
+                { where: { role_id: _role_id, permission_id: { [Op.notIn]: validMenuIds } } }
+            );
+
+            logAction(req, 'Role permission updated. Role name = ' + roleRow.role_name,
+                { role_id: _role_id, permissions_updated: validMenuIds });
+        }
+
+        return res.status(200).json(success(true, res.statusCode, "Permission saved successfully.", null));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
