@@ -1,10 +1,31 @@
 import { logger as _logger, action_logger } from '../../logger/winston.js';
 import db from '../../database/db_helper.js';
 import { success } from "../../model/responseModel.js";
-import { QueryTypes, Op } from 'sequelize';
+import { Op } from 'sequelize';
 import dateFormat from 'date-format';
 import validator from 'validator';
 import correlator from 'express-correlation-id';
+
+// Helper: Parse numeric value with default
+const parseNumericWithDefault = (value, defaultVal = 0) => {
+    return value && validator.isNumeric(value.toString()) ? parseInt(value) : defaultVal;
+};
+
+// Helper: Log action to action_logger
+const logAction = (req, narration, query) => {
+    try {
+        action_logger.info(JSON.stringify({
+            correlation_id: correlator.getId(),
+            token_id: req.token_data.token_id,
+            account_id: req.token_data.account_id,
+            user_type: 1,
+            user_id: req.token_data.admin_id,
+            narration,
+            query: JSON.stringify(query),
+            date_time: db.get_ist_current_date(),
+        }));
+    } catch (_) { }
+};
 
 const email_template_list = async (req, res, next) => {
     const { EmailTemplate } = db.models;
@@ -63,7 +84,7 @@ const email_template_get = async (req, res, next) => {
 };
 
 const email_template_set = async (req, res, next) => {
-    const { id, template_name, subject, body_text } = req.body;
+    const { id, subject, body_text } = req.body;
     const { EmailTemplate } = db.models;
     try {
         let template_id = id && validator.isNumeric(id.toString()) ? parseInt(id) : 0;
@@ -179,7 +200,7 @@ const sms_template_get = async (req, res, next) => {
 };
 
 const sms_template_set = async (req, res, next) => {
-    const { id, template_name, message_text } = req.body;
+    const { id, message_text } = req.body;
     const { SmsTemplate } = db.models;
     try {
         let template_id = id && validator.isNumeric(id.toString()) ? parseInt(id) : 0;
@@ -303,108 +324,51 @@ const businessEmailSet = async (req, res, next) => {
     const { id, email_id, first_name, last_name, mobile_no, type_id } = req.body;
     const { BusinessEmail } = db.models;
     try {
-        let businessId = id && validator.isNumeric(id.toString()) ? parseInt(id) : 0;
-        let typeId = type_id && validator.isNumeric(type_id.toString()) ? parseInt(type_id) : 0;
+        const businessId = parseNumericWithDefault(id);
+        const typeId = parseNumericWithDefault(type_id);
 
         if (!email_id || email_id.length <= 0) {
             return res.status(200).json(success(false, res.statusCode, "Please enter email-id.", null));
         }
 
         // Check for duplicate email
-        const row1 = await BusinessEmail.findOne({
-            where: {
-                id: { [Op.ne]: businessId },
-                email_id: email_id,
-                is_deleted: false
-            },
-            attributes: ['id', 'email_id']
+        const existingEmail = await BusinessEmail.findOne({
+            where: { id: { [Op.ne]: businessId }, email_id, is_deleted: false },
+            attributes: ['id']
         });
-
-        if (row1) {
+        if (existingEmail) {
             return res.status(200).json(success(false, res.statusCode, "email-id is already exists.", null));
         }
 
+        // Update existing record
         if (businessId > 0) {
-            // Update existing record
-            const [affectedRows] = await BusinessEmail.update(
-                {
-                    email_id: email_id,
-                    first_name: first_name,
-                    last_name: last_name,
-                    mobile_no: mobile_no,
-                    modify_date: db.get_ist_current_date(),
-                    modify_by: req.token_data.account_id,
-                    type_id: typeId
-                },
-                {
-                    where: { id: businessId }
-                }
-            );
+            const [affectedRows] = await BusinessEmail.update({
+                email_id, first_name, last_name, mobile_no,
+                modify_date: db.get_ist_current_date(), modify_by: req.token_data.account_id, type_id: typeId
+            }, { where: { id: businessId } });
 
-            if (affectedRows > 0) {
-                try {
-                    let data_to_log = {
-                        correlation_id: correlator.getId(),
-                        token_id: req.token_data.token_id,
-                        account_id: req.token_data.account_id,
-                        user_type: 1,
-                        user_id: req.token_data.admin_id,
-                        narration: 'EmailId updated. email id name = ' + email_id,
-                        query: JSON.stringify({
-                            id: businessId,
-                            email_id: email_id,
-                            first_name: first_name,
-                            last_name: last_name
-                        }),
-                        date_time: db.get_ist_current_date(),
-                    }
-                    action_logger.info(JSON.stringify(data_to_log));
-                } catch (_) { }
-
-                return res.status(200).json(success(true, res.statusCode, "Updated successfully.", null));
-            } else {
+            if (affectedRows <= 0) {
                 return res.status(200).json(success(false, res.statusCode, "Unable to update, Please try again", null));
             }
-        } else {
-            // Create new record
-            const newRecord = await BusinessEmail.create({
-                email_id: email_id,
-                first_name: first_name,
-                last_name: last_name,
-                mobile_no: mobile_no,
-                added_by: req.token_data.account_id,
-                modify_by: req.token_data.account_id,
-                added_date: db.get_ist_current_date(),
-                modify_date: db.get_ist_current_date(),
-                type_id: typeId
-            });
 
-            const businessID = newRecord?.id ?? 0;
-
-            if (businessID > 0) {
-                try {
-                    let data_to_log = {
-                        correlation_id: correlator.getId(),
-                        token_id: req.token_data.token_id,
-                        account_id: req.token_data.account_id,
-                        user_type: 1,
-                        user_id: req.token_data.admin_id,
-                        narration: 'New Email added. email name = ' + email_id,
-                        query: JSON.stringify({
-                            email_id: email_id,
-                            first_name: first_name,
-                            last_name: last_name
-                        }),
-                        date_time: db.get_ist_current_date(),
-                    }
-                    action_logger.info(JSON.stringify(data_to_log));
-                } catch (_) { }
-
-                return res.status(200).json(success(true, res.statusCode, "Saved successfully.", null));
-            } else {
-                return res.status(200).json(success(false, res.statusCode, "Unable to save, Please try again", null));
-            }
+            logAction(req, 'EmailId updated. email id name = ' + email_id,
+                { id: businessId, email_id, first_name, last_name });
+            return res.status(200).json(success(true, res.statusCode, "Updated successfully.", null));
         }
+
+        // Create new record
+        const newRecord = await BusinessEmail.create({
+            email_id, first_name, last_name, mobile_no,
+            added_by: req.token_data.account_id, modify_by: req.token_data.account_id,
+            added_date: db.get_ist_current_date(), modify_date: db.get_ist_current_date(), type_id: typeId
+        });
+
+        if ((newRecord?.id ?? 0) <= 0) {
+            return res.status(200).json(success(false, res.statusCode, "Unable to save, Please try again", null));
+        }
+
+        logAction(req, 'New Email added. email name = ' + email_id, { email_id, first_name, last_name });
+        return res.status(200).json(success(true, res.statusCode, "Saved successfully.", null));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
@@ -446,7 +410,7 @@ const businessEmailToggle = async (req, res, next) => {
                     account_id: req.token_data.account_id,
                     user_type: 1,
                     user_id: req.token_data.admin_id,
-                    narration: 'Email-id ' + (row1.is_enabled === true ? 'disabled' : 'enabled') + '. email-id name = ' + row1.email_id,
+                    narration: 'Email-id ' + (row1.is_enabled ? 'disabled' : 'enabled') + '. email-id name = ' + row1.email_id,
                     query: JSON.stringify({
                         id: id,
                         is_enabled: !row1.is_enabled
