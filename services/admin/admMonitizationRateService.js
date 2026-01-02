@@ -48,32 +48,36 @@ const processFixedPerUnitPricing = (rate, currencyCode) => {
     }];
 };
 
+// Helper: Validate fee object in rate
+const validateFeeObject = (fee, index) => {
+    const feeFields = { currencyCode: 'string', nanos: 'number', units: 'number' };
+    for (const nestedKey in feeFields) {
+        if (!fee.hasOwnProperty(nestedKey) || typeof fee[nestedKey] !== feeFields[nestedKey]) {
+            return `Invalid or missing field '${nestedKey}' in fee object at index ${index}`;
+        }
+    }
+    return null;
+};
+
+// Helper: Validate single rate object
+const validateSingleRate = (rate, index) => {
+    const requiredFields = ['fee', 'start', 'end'];
+    for (const key of requiredFields) {
+        if (!rate.hasOwnProperty(key)) {
+            return `Missing field '${key}' in rate at index ${index}`;
+        }
+    }
+    if (typeof rate.start !== 'number') return `Field 'start' must be of type number at index ${index}`;
+    if (typeof rate.end !== 'number') return `Field 'end' must be of type number at index ${index}`;
+    return validateFeeObject(rate.fee, index);
+};
+
 // Helper: Validate banded consumption pricing rates
 const validateBandedPricingRates = (rates) => {
     if (!Array.isArray(rates)) return "consumptionPricingRates must be an array";
-
-    const requiredFields = {
-        fee: { currencyCode: 'string', nanos: 'number', units: 'number' },
-        start: 'number',
-        end: 'number'
-    };
-
     for (let i = 0; i < rates.length; i++) {
-        const rate = rates[i];
-        for (const key in requiredFields) {
-            if (!rate.hasOwnProperty(key)) {
-                return `Missing field '${key}' in rate at index ${i}`;
-            }
-            if (typeof requiredFields[key] === 'object') {
-                for (const nestedKey in requiredFields[key]) {
-                    if (!rate[key].hasOwnProperty(nestedKey) || typeof rate[key][nestedKey] !== requiredFields[key][nestedKey]) {
-                        return `Invalid or missing field '${nestedKey}' in fee object at index ${i}`;
-                    }
-                }
-            } else if (typeof rate[key] !== requiredFields[key]) {
-                return `Field '${key}' must be of type ${requiredFields[key]} at index ${i}`;
-            }
-        }
+        const error = validateSingleRate(rates[i], i);
+        if (error) return error;
     }
     return null;
 };
@@ -200,7 +204,7 @@ const logMonitizationAction = (tokenData, narration, queryData) => {
 
 // Helper: Handle admin rate creation with Apigee call
 const handleAdminRateCreation = async (params) => {
-    const { ProductMonitazationRate, Product, recordData, apigeePayload, productName, productId, tokenData, res, isUpdate, ratePlanName } = params;
+    const { ProductMonitazationRate, Product, recordData, apigeePayload, productName, productId, tokenData,  isUpdate, ratePlanName } = params;
 
     const newRate = await ProductMonitazationRate.create(recordData);
     const rateId = newRate?.rate_id ?? 0;
@@ -278,7 +282,10 @@ const rejectRatePlan = async (ProductMonitazationRate, rateId, productId, tokenD
 };
 
 // Helper: Approve rate plan record
-const approveRatePlan = async (ProductMonitazationRate, Product, rateId, productId, tokenData, remark, responseData, payload) => {
+const approveRatePlan = async (models, rateId, productId, tokenData, approvalData) => {
+    const { ProductMonitazationRate, Product } = models;
+    const { remark, responseData, payload } = approvalData;
+
     await ProductMonitazationRate.update(
         {
             is_rate_plan_approved: true,
@@ -298,6 +305,18 @@ const approveRatePlan = async (ProductMonitazationRate, Product, rateId, product
         { where: { product_id: productId } }
     );
     return affectedRows;
+};
+
+// Helper: Process and validate consumption pricing rates
+const processConsumptionPricingRates = (pricingType, rates, currencyCode) => {
+    if (pricingType === "FIXED_PER_UNIT") {
+        return { rates: processFixedPerUnitPricing(rates, currencyCode), error: null };
+    }
+    const ratesError = validateBandedPricingRates(rates);
+    if (ratesError) {
+        return { rates: null, error: ratesError };
+    }
+    return { rates: rates, error: null };
 };
 
 // Helper: Build approve payload from row data
@@ -424,16 +443,10 @@ const product_monitization_rate_update = async (req, res, next) => {
         const _endTime = calculateEndTime(_expiry_type, expiry_time, currentTime);
 
         // Process consumption pricing rates
-        let consumptionPricingRates_new;
         const currencyCode = 'INR';
-        if (consumptionPricingType === "FIXED_PER_UNIT") {
-            consumptionPricingRates_new = processFixedPerUnitPricing(consumptionPricingRates, currencyCode);
-        } else {
-            const ratesError = validateBandedPricingRates(consumptionPricingRates);
-            if (ratesError) {
-                return res.status(200).json(success(false, res.statusCode, ratesError, null));
-            }
-            consumptionPricingRates_new = consumptionPricingRates;
+        const { rates: consumptionPricingRates_new, error: ratesError } = processConsumptionPricingRates(consumptionPricingType, consumptionPricingRates, currencyCode);
+        if (ratesError) {
+            return res.status(200).json(success(false, res.statusCode, ratesError, null));
         }
 
         // Check user roles
@@ -948,7 +961,7 @@ const product_monitization_rate_approve = async (req, res, next) => {
             return res.status(200).json(success(false, res.statusCode, errorMsg || "Unable to Add Product Monetization Rate, Please try again.", null));
         }
 
-        const affectedRows = await approveRatePlan(ProductMonitazationRate, Product, _rate_id, _product_id, req.token_data, remark, responseData, payload);
+        const affectedRows = await approveRatePlan({ ProductMonitazationRate, Product }, _rate_id, _product_id, req.token_data, { remark, responseData, payload });
 
         if (affectedRows <= 0) {
             return res.status(200).json(success(false, res.statusCode, "Unable to Add Product Monetization Rate, Please try again.", null));

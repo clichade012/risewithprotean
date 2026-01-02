@@ -489,127 +489,68 @@ const product_rate_attribute_approve = async (req, res, next) => {
     const { product_rate_id, product_id, remark } = req.body;
     const { ProductRateAttribute, Product } = db.models;
     try {
-        let _product_rate_id = product_rate_id && validator.isNumeric(product_rate_id.toString()) ? parseInt(product_rate_id) : 0;
-        let _product_id = product_id && validator.isNumeric(product_id.toString()) ? parseInt(product_id) : 0;
+        const _product_rate_id = parseNumericValue(product_rate_id);
+        const _product_id = parseNumericValue(product_id);
 
         if (!remark || remark.length <= 0) {
             return res.status(200).json(success(false, res.statusCode, "Please enter remark.", null));
         }
+
         const [is_admin, is_checker] = await commonModule.getUserRoles(req);
-        if (is_admin || is_checker) {
-            const row1 = await ProductRateAttribute.findOne({
-                include: [{
-                    model: Product,
-                    as: 'product',
-                    where: { is_deleted: false },
-                    attributes: ['product_name'],
-                    required: true
-                }],
-                where: {
-                    arate_id: _product_rate_id,
-                    product_id: _product_id,
-                    is_deleted: false
-                },
-                attributes: ['arate_id', 'product_id', 'rate_plan_value', 'is_rate_plan_rejected', 'ckr_rate_plan_is_rejected',
-                            'is_rate_plan_approved', 'ckr_is_rate_plan_approved'],
-                raw: true
-            });
 
-            if (!row1) {
-                return res.status(200).json(success(false, res.statusCode, "Product Rate Attribute details not found.", null));
-            }
-            if (row1.is_rate_plan_approved && row1.is_rate_plan_approved == true) {
-                return res.status(200).json(success(false, res.statusCode, "Product Rate Attribute is already approved.", null));
-            }
-            if (row1.ckr_is_rate_plan_approved && row1.ckr_is_rate_plan_approved == true) {
-                return res.status(200).json(success(false, res.statusCode, "Product Rate Attribute is already approved.", null));
-            }
-            if (row1.is_rate_plan_rejected && row1.is_rate_plan_rejected == true) {
-                return res.status(200).json(success(false, res.statusCode, "Product Rate Attribute is rejected, can not approve.", null));
-            }
-            if (row1.ckr_rate_plan_is_rejected && row1.ckr_rate_plan_is_rejected == true) {
-                return res.status(200).json(success(false, res.statusCode, "Product Rate Attribute is rejected, can not approve.", null));
-            }
-
-            const product_name = row1['product.product_name'];
-            const product_rate_value = row1.rate_plan_value;
-
-            const data = { attribute: [{ name: "defaultRateMultiper", value: product_rate_value, }], };
-            const product_URL = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/apiproducts/${product_name}/attributes`;
-            const apigeeAuth = await db.get_apigee_token();
-            const response = await fetch(product_URL, {
-                method: "POST",
-                headers: { Authorization: `Bearer ${apigeeAuth}`, "Content-Type": "application/json", },
-                body: JSON.stringify(data),
-            });
-            const responseData = await response.json();
-            if (responseData) {
-                const rate_plan_response = JSON.stringify(responseData);
-
-                const [affectedRows1] = await Product.update(
-                    {
-                        rate_plan_value: product_rate_value,
-                        rate_plan_added_by: req.token_data.account_id,
-                        rate_added_date: db.get_ist_current_date(),
-                        rate_plan_json_data: rate_plan_response
-                    },
-                    {
-                        where: { product_id: _product_id }
-                    }
-                );
-
-                if (affectedRows1 > 0) {
-                    await ProductRateAttribute.update(
-                        {
-                            is_rate_plan_approved: true,
-                            ckr_is_rate_plan_approved: true,
-                            rate_plan_json_data: rate_plan_response,
-                            ckr_rate_plan_approved_by: req.token_data.account_id,
-                            ckr_rate_plan_approved_date: db.get_ist_current_date(),
-                            ckr_rate_plan_approved_rmk: remark
-                        },
-                        {
-                            where: {
-                                arate_id: product_rate_id,
-                                product_id: _product_id
-                            }
-                        }
-                    );
-
-                    try {
-                        let data_to_log = {
-                            correlation_id: correlator.getId(),
-                            token_id: req.token_data.token_id,
-                            account_id: req.token_data.account_id,
-                            user_type: 1,
-                            user_id: req.token_data.admin_id,
-                            narration: 'Product Attribute Rate added  Product name = ' + product_name + ', Product Attribute Value = ' + product_rate_value,
-                            query: JSON.stringify({
-                                product_id: _product_id,
-                                arate_id: product_rate_id,
-                                rate_plan_value: product_rate_value,
-                                approved_by: req.token_data.account_id,
-                                remark: remark
-                            }),
-                        }
-                        action_logger.info(JSON.stringify(data_to_log));
-                    } catch (_) { console.log("---catch----------"); }
-
-                    return res.status(200).json(success(true, res.statusCode, "Product Attribute Rate Added successfully.", null));
-                } else {
-                    return res.status(200).json(success(false, res.statusCode, "Unable to Add Product Attribute Rate, Please try again.", null));
-                }
-            }
-            if (responseData?.error?.message) {
-                const message = `Apigee response: ${responseData.error.message}`;
-                const statusCode = responseData?.error?.status === 'ABORTED' && responseData?.error?.code === 409 ? 200 : 400;
-                return res.status(statusCode).json(success(false, statusCode, message, null));
-            }
-            return res.status(200).json(success(false, res.statusCode, "Unable to Add Rate, Please try again.", null));
-
-        } else {
+        if (!is_admin && !is_checker) {
             return res.status(500).json(success(false, API_STATUS.BACK_TO_DASHBOARD.value, "You do not have checker/maker authority.", null));
         }
+
+        const row1 = await ProductRateAttribute.findOne({
+            include: [{ model: Product, as: 'product', where: { is_deleted: false }, attributes: ['product_name'], required: true }],
+            where: { arate_id: _product_rate_id, product_id: _product_id, is_deleted: false },
+            attributes: ['arate_id', 'product_id', 'rate_plan_value', 'is_rate_plan_rejected', 'ckr_rate_plan_is_rejected', 'is_rate_plan_approved', 'ckr_is_rate_plan_approved'],
+            raw: true
+        });
+
+        if (!row1) {
+            return res.status(200).json(success(false, res.statusCode, "Product Rate Attribute details not found.", null));
+        }
+
+        const validationError = validateRatePlanForApproval(row1);
+        if (validationError) {
+            return res.status(200).json(success(false, res.statusCode, validationError, null));
+        }
+
+        const product_name = row1['product.product_name'];
+        const product_rate_value = row1.rate_plan_value;
+
+        const responseData = await callApigeeAttributesApi(product_name, product_rate_value);
+
+        if (!responseData) {
+            return res.status(200).json(success(false, res.statusCode, "Unable to Add Rate, Please try again.", null));
+        }
+
+        const errorMsg = getApigeeErrorMessage(responseData);
+        if (errorMsg) {
+            return res.status(200).json(success(false, res.statusCode, errorMsg, null));
+        }
+
+        const rate_plan_response = JSON.stringify(responseData);
+
+        const [affectedRows1] = await Product.update(
+            { rate_plan_value: product_rate_value, rate_plan_added_by: req.token_data.account_id, rate_added_date: db.get_ist_current_date(), rate_plan_json_data: rate_plan_response },
+            { where: { product_id: _product_id } }
+        );
+
+        if (affectedRows1 <= 0) {
+            return res.status(200).json(success(false, res.statusCode, "Unable to Add Product Attribute Rate, Please try again.", null));
+        }
+
+        await ProductRateAttribute.update(
+            { is_rate_plan_approved: true, ckr_is_rate_plan_approved: true, rate_plan_json_data: rate_plan_response, ckr_rate_plan_approved_by: req.token_data.account_id, ckr_rate_plan_approved_date: db.get_ist_current_date(), ckr_rate_plan_approved_rmk: remark },
+            { where: { arate_id: product_rate_id, product_id: _product_id } }
+        );
+
+        logRateAction(req.token_data, `Product Attribute Rate added Product name = ${product_name}, Product Attribute Value = ${product_rate_value}`, { product_id: _product_id, arate_id: product_rate_id, rate_plan_value: product_rate_value, approved_by: req.token_data.account_id, remark });
+
+        return res.status(200).json(success(true, res.statusCode, "Product Attribute Rate Added successfully.", null));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));

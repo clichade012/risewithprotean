@@ -1,7 +1,7 @@
 import { logger as _logger, action_logger } from "../../logger/winston.js";
 import db from "../../database/db_helper.js";
 import { success } from "../../model/responseModel.js";
-import { Op, literal } from "sequelize";
+import { Op } from "sequelize";
 import dateFormat from "date-format";
 import validator from "validator";
 import { fetch } from 'cross-fetch';
@@ -14,7 +14,7 @@ import cloudStorage from "../cloudStorage.js";
 
 const api_products_list = async (req, res, next) => {
     const { page_no, search_text, order_by_filter } = req.body;
-    const { Product, AdmUser } = db.models;
+    const { Product } = db.models;
     try {
         let _page_no = page_no && validator.isNumeric(page_no.toString()) ? parseInt(page_no) : 0;
         let _order_by_filter = order_by_filter && validator.isNumeric(order_by_filter.toString()) ? parseInt(order_by_filter) : 0;
@@ -306,7 +306,7 @@ const api_products_publish = async (req, res, next) => {
                     account_id: req.token_data.account_id,
                     user_type: 1,
                     user_id: req.token_data.admin_id,
-                    narration: 'Product ' + (row1.is_published == true ? 'unpublish' : 'publish') + ' from website. Product name = ' + row1.product_name,
+                    narration: 'Product ' + (row1.is_published ? 'unpublish' : 'publish') + ' from website. Product name = ' + row1.product_name,
                     query: JSON.stringify({
                         product_id: _product_id,
                         is_published_toggled: true
@@ -468,7 +468,7 @@ const proxy_products_update = async (req, res, next) => {
                             proxy_database_list.push({ id: proxy_id, ids: [] });
                         }
 
-                        if (proxyRow.is_deleted && proxyRow.is_deleted === true) {
+                        if (proxyRow.is_deleted) {
                             await Proxies.update(
                                 { is_deleted: false },
                                 { where: { proxy_id: proxy_id } }
@@ -506,7 +506,7 @@ const proxy_products_update = async (req, res, next) => {
                                 );
                             }
 
-                            if (endpointRow.is_deleted && endpointRow.is_deleted == true) {
+                            if (endpointRow.is_deleted) {
                                 await Endpoint.update(
                                     { is_deleted: false },
                                     { where: { endpoint_id: endpointRow.endpoint_id } }
@@ -589,7 +589,7 @@ const proxy_products_update = async (req, res, next) => {
                                     );
                                 }
 
-                                if (endpointRow2.is_deleted && endpointRow2.is_deleted == true) {
+                                if (endpointRow2.is_deleted) {
                                     await Endpoint.update(
                                         { is_deleted: false },
                                         { where: { endpoint_id: endpointRow2.endpoint_id } }
@@ -783,7 +783,7 @@ const proxy_publish_toggle = async (req, res, next) => {
                     account_id: req.token_data.account_id,
                     user_type: 1,
                     user_id: req.token_data.admin_id,
-                    narration: 'Proxy ' + (proxyRow.is_published == true ? 'unpublish' : 'publish') + '. Proxy name = ' + proxyRow.proxy_name,
+                    narration: 'Proxy ' + (proxyRow.is_published ? 'unpublish' : 'publish') + '. Proxy name = ' + proxyRow.proxy_name,
                     query: `Proxies.update({ is_published: ${newPublishedStatus} }, { where: { proxy_id: ${_proxy_id} }})`,
                     date_time: db.get_ist_current_date(),
                 }
@@ -1098,7 +1098,7 @@ const product_set_new = async (req, res, next) => {
             if (!productRow) {
                 return res.status(200).json(success(false, res.statusCode, "Product details not found, Please try again.", null));
             }
-            const is_manual = productRow.is_manual && productRow.is_manual == true ? true : false;
+            const is_manual = Boolean(productRow.is_manual);
             if (!is_manual) {
                 return res.status(200).json(success(false, res.statusCode, "Only manually added product can be edited.", null));
             }
@@ -1190,7 +1190,7 @@ const product_delete = async (req, res, next) => {
             return res.status(200).json(success(false, res.statusCode, "Product details not found.", null));
         }
         const is_manual = productRow.is_manual;
-        if (is_manual && is_manual === true) {
+        if (is_manual) {
             const [affectedRows] = await Product.update(
                 {
                     is_deleted: true,
@@ -1262,7 +1262,7 @@ const proxy_endpoint_publish_toggle = async (req, res, next) => {
                     account_id: req.token_data.account_id,
                     user_type: 1,
                     user_id: req.token_data.admin_id,
-                    narration: 'Proxy End-points ' + (endpointRow.is_published == true ? 'unpublish' : 'publish') + '. Proxy End-point name = ' + endpointRow.display_name,
+                    narration: 'Proxy End-points ' + (endpointRow.is_published ? 'unpublish' : 'publish') + '. Proxy End-point name = ' + endpointRow.display_name,
                     query: `Endpoint.update({ is_published: ${newPublishedStatus} }, { where: { endpoint_id: ${_endpoint_id} }})`,
                     date_time: db.get_ist_current_date(),
                 }
@@ -1372,7 +1372,7 @@ const product_pages_set = async (req, res, next) => {
             if (!pageRow) {
                 return res.status(200).json(success(false, res.statusCode, "Product Pages details not found, Please try again.", null));
             }
-            if (show_api_method && show_api_method == true) {
+            if (show_api_method) {
                 const apiMethodPage = await ProductPages.findOne({
                     where: { page_id: { [Op.ne]: _page_id }, product_id: _product_id, show_api_method: true, is_deleted: false },
                     attributes: ['menu_name', 'show_api_method'],
@@ -1415,7 +1415,7 @@ const product_pages_set = async (req, res, next) => {
                 return res.status(200).json(success(false, res.statusCode, "Unable to update, Please try again", null));
             }
         } else {
-            if (show_api_method && show_api_method == true) {
+            if (show_api_method) {
                 const apiMethodPage = await ProductPages.findOne({
                     where: { product_id: _product_id, show_api_method: true, is_deleted: false },
                     attributes: ['menu_name'],
@@ -1497,7 +1497,7 @@ const product_pages_publish_toggle = async (req, res, next) => {
                     account_id: req.token_data.account_id,
                     user_type: 1,
                     user_id: req.token_data.admin_id,
-                    narration: 'Product Menu ' + (pageRow.is_published == true ? 'unpublish' : 'publish') + '. Product Menu name = ' + pageRow.menu_name,
+                    narration: 'Product Menu ' + (pageRow.is_published ? 'unpublish' : 'publish') + '. Product Menu name = ' + pageRow.menu_name,
                     query: `ProductPages.update({ is_published: ${newPublishedStatus} }, { where: { page_id: ${_page_id} }})`,
                     date_time: db.get_ist_current_date(),
                 }
@@ -1527,7 +1527,7 @@ const product_pages_menu_delete = async (req, res, next) => {
         if (!pageRow) {
             return res.status(200).json(success(false, res.statusCode, "Menu details not found.", null));
         }
-        if (pageRow.is_integration_page && pageRow.is_integration_page == true) {
+        if (pageRow.is_integration_page) {
             return res.status(200).json(success(false, res.statusCode, "Integration Page can not be deleted", null));
         }
 
@@ -1848,7 +1848,7 @@ const proxy_schema_toggle = async (req, res, next) => {
                     account_id: req.token_data.account_id,
                     user_type: 1,
                     user_id: req.token_data.admin_id,
-                    narration: 'Api schema ' + (schemaRow.is_enabled == true ? 'disabled' : 'enabled') + '.  Api Schema status code = ' + schemaRow.status_code,
+                    narration: 'Api schema ' + (schemaRow.is_enabled ? 'disabled' : 'enabled') + '.  Api Schema status code = ' + schemaRow.status_code,
                     query: `ProxySchema.update({ is_enabled: ${newEnabledStatus} }, { where: { schema_id: ${_schema_id} }})`,
                     date_time: db.get_ist_current_date(),
                 }
@@ -1960,7 +1960,7 @@ const proxy_endpoint_publish_api_product = async (req, res, next) => {
                     account_id: req.token_data.account_id,
                     user_type: 1,
                     user_id: req.token_data.admin_id,
-                    narration: 'Proxy End-points Api Product ' + (endpointRow.is_product_published == true ? 'unpublish' : 'publish') + '. Proxy End-point name = ' + endpointRow.display_name,
+                    narration: 'Proxy End-points Api Product ' + (endpointRow.is_product_published ? 'unpublish' : 'publish') + '. Proxy End-point name = ' + endpointRow.display_name,
                     query: `Endpoint.update({ is_product_published: ${newPublishedStatus} }, { where: { endpoint_id: ${_endpoint_id} }})`,
                     date_time: db.get_ist_current_date(),
                 }
@@ -2008,7 +2008,7 @@ const products_publish_api_product = async (req, res, next) => {
                     account_id: req.token_data.account_id,
                     user_type: 1,
                     user_id: req.token_data.admin_id,
-                    narration: 'API Product ' + (productRow.is_product_published == true ? 'unpublish' : 'publish') + ' from website. Product name = ' + productRow.product_name,
+                    narration: 'API Product ' + (productRow.is_product_published ? 'unpublish' : 'publish') + ' from website. Product name = ' + productRow.product_name,
                     query: `Product.update({ is_product_published: ${newPublishedStatus} }, { where: { product_id: ${_product_id} }})`,
                     date_time: db.get_ist_current_date(),
                 }
@@ -2045,7 +2045,7 @@ const manual_endpoint_set = async (req, res, next) => {
             if (!row3 && row3.length <= 0) {
                 return res.status(200).json(success(false, res.statusCode, "endpoints details not found, Please try again.", null));
             }
-            const is_manual = row3[0].is_manual && row3[0].is_manual == true ? true : false;
+            const is_manual = Boolean(row3[0].is_manual);
             if (!is_manual) {
                 return res.status(200).json(success(false, res.statusCode, "Only manually added endpoint can be edited.", null));
             }
@@ -2222,7 +2222,7 @@ const products_routing_set = async (req, res, next) => {
                     account_id: req.token_data.account_id,
                     user_type: 1,
                     user_id: req.token_data.admin_id,
-                    narration: 'API Product Set for Routing ' + (row1[0].is_product_published == true ? 'Routing Applicable' : 'Not Applicable') + row1[0].product_name,
+                    narration: 'API Product Set for Routing ' + (row1[0].is_product_published ? 'Routing Applicable' : 'Not Applicable') + row1[0].product_name,
                     query: db.buildQuery_Array(_query2, _replacements2),
                     date_time: db.get_ist_current_date(),
                 }
