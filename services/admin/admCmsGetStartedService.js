@@ -61,30 +61,58 @@ const cms_get_started_get = async (req, res, next) => {
     }
 }
 
+// Helper: Validate get started input fields
+const validateGetStartedInput = (title, heading, contents) => {
+    if (!title || title.length <= 0) {
+        return { valid: false, message: "Please enter title." };
+    }
+    if (!heading || heading.length <= 0) {
+        return { valid: false, message: "Please enter heading." };
+    }
+    if (!contents || contents.length <= 0) {
+        return { valid: false, message: "Please enter contents." };
+    }
+    return { valid: true };
+};
+
+// Helper: Log get started update action
+const logGetStartedUpdate = (tokenData, sectionName) => {
+    try {
+        const data_to_log = {
+            correlation_id: correlator.getId(),
+            token_id: tokenData.token_id,
+            account_id: tokenData.account_id,
+            user_type: 1,
+            user_id: tokenData.admin_id,
+            narration: `Update contents for "Get Started" (section = ${sectionName})`,
+            query: 'GetStarted.update',
+            date_time: db.get_ist_current_date(),
+        };
+        action_logger.info(JSON.stringify(data_to_log));
+    } catch (_) { /* ignore logging errors */ }
+};
+
 const cms_get_started_set = async (req, res, next) => {
     const { table_id, title, heading, contents } = req.body;
     try {
         const { GetStarted } = db.models;
-        let _table_id = table_id && validator.isNumeric(table_id.toString()) ? parseInt(table_id) : 0;
+        const _table_id = table_id && validator.isNumeric(table_id.toString()) ? parseInt(table_id) : 0;
 
         const row1 = await GetStarted.findOne({
             where: { table_id: _table_id },
             attributes: ['table_id', 'section_name']
         });
+
         if (!row1) {
             return res.status(200).json(success(false, res.statusCode, "Section details not found, Please try again.", null));
         }
 
-        if (!title || title.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter title.", null));
+        const validation = validateGetStartedInput(title, heading, contents);
+        if (!validation.valid) {
+            return res.status(200).json(success(false, res.statusCode, validation.message, null));
         }
-        if (!heading || heading.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter heading.", null));
-        }
-        if (!contents || contents.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter contents.", null));
-        }
-        let image_1 = req.files['desktop'] && req.files['desktop'].length > 0 ? req.files['desktop'][0].filename : '';
+
+        const image_1 = req.files?.['desktop']?.[0]?.filename || '';
 
         const updateData = {
             title_text: title,
@@ -93,34 +121,19 @@ const cms_get_started_set = async (req, res, next) => {
             modify_by: req.token_data.account_id,
             modify_date: db.get_ist_current_date(),
         };
-        if (image_1.length > 0) {
+
+        if (image_1) {
             updateData.image_1 = image_1;
         }
 
-        const [affectedRows] = await GetStarted.update(updateData, {
-            where: { table_id: _table_id }
-        });
-        if (affectedRows > 0) {
+        const [affectedRows] = await GetStarted.update(updateData, { where: { table_id: _table_id } });
 
-            try {
-                let data_to_log = {
-                    correlation_id: correlator.getId(),
-                    token_id: req.token_data.token_id,
-                    account_id: req.token_data.account_id,
-                    user_type: 1,
-                    user_id: req.token_data.admin_id,
-                    narration: 'Update contents for "Get Started" (section = ' + row1.section_name + ')',
-                    query: 'GetStarted.update',
-                    date_time: db.get_ist_current_date(),
-                }
-                action_logger.info(JSON.stringify(data_to_log));
-            } catch (_) { }
-
-
-            return res.status(200).json(success(true, res.statusCode, "Updated successfully.", null));
-        } else {
+        if (affectedRows <= 0) {
             return res.status(200).json(success(false, res.statusCode, "Unable to updated, Please try again.", null));
         }
+
+        logGetStartedUpdate(req.token_data, row1.section_name);
+        return res.status(200).json(success(true, res.statusCode, "Updated successfully.", null));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));

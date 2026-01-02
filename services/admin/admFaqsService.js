@@ -6,6 +6,88 @@ import dateFormat from 'date-format';
 import validator from 'validator';
 import correlator from 'express-correlation-id';
 
+// Helper: Parse numeric ID
+const parseNumericId = (value) => {
+    return value && validator.isNumeric(value.toString()) ? parseInt(value) : 0;
+};
+
+// Helper: Log FAQ action
+const logFaqAction = (tokenData, narration, query) => {
+    try {
+        const data_to_log = {
+            correlation_id: correlator.getId(),
+            token_id: tokenData.token_id,
+            account_id: tokenData.account_id,
+            user_type: 1,
+            user_id: tokenData.admin_id,
+            narration,
+            query,
+            date_time: db.get_ist_current_date(),
+        };
+        action_logger.info(JSON.stringify(data_to_log));
+    } catch (_) { /* ignore logging errors */ }
+};
+
+// Helper: Update FAQ type record
+const updateFaqType = async (FaqType, type_id, data, tokenData, oldRecord, name) => {
+    const [affectedRows] = await FaqType.update(
+        { ...data, modify_date: db.get_ist_current_date(), modify_by: tokenData.account_id },
+        { where: { type_id } }
+    );
+    if (affectedRows > 0) {
+        const nameChanged = oldRecord?.faq_type !== name;
+        const narration = `FAQ type updated. FAQ type name = ${nameChanged ? oldRecord?.faq_type + ' to ' + name : name}`;
+        logFaqAction(tokenData, narration, `FaqType.update({ faq_type: '${name}' }, { where: { type_id: ${type_id} }})`);
+    }
+    return affectedRows;
+};
+
+// Helper: Create FAQ type record
+const createFaqType = async (FaqType, data, tokenData) => {
+    const newRecord = await FaqType.create({
+        ...data,
+        added_by: tokenData.account_id,
+        modify_by: tokenData.account_id,
+        added_date: db.get_ist_current_date(),
+        modify_date: db.get_ist_current_date()
+    });
+    if (newRecord?.type_id > 0) {
+        logFaqAction(tokenData, `New FAQ type added. FAQ type name = ${data.faq_type}`,
+            `FaqType.create({ faq_type: '${data.faq_type}' })`);
+    }
+    return newRecord;
+};
+
+// Helper: Update FAQ detail record
+const updateFaqDetail = async (FaqDetail, faq_id, data, tokenData, question) => {
+    const [affectedRows] = await FaqDetail.update(
+        { ...data, modify_date: db.get_ist_current_date(), modify_by: tokenData.account_id },
+        { where: { faq_id } }
+    );
+    if (affectedRows > 0) {
+        logFaqAction(tokenData, `FAQ details updated. Question name = ${question}`,
+            `FaqDetail.update({ question: '${question}' }, { where: { faq_id: ${faq_id} }})`);
+    }
+    return affectedRows;
+};
+
+// Helper: Create FAQ detail record
+const createFaqDetail = async (FaqDetail, data, tokenData) => {
+    const newRecord = await FaqDetail.create({
+        ...data,
+        is_enabled: true,
+        added_by: tokenData.account_id,
+        modify_by: tokenData.account_id,
+        added_date: db.get_ist_current_date(),
+        modify_date: db.get_ist_current_date()
+    });
+    if (newRecord?.faq_id > 0) {
+        logFaqAction(tokenData, `New FAQ details added. Question name = ${data.question}`,
+            `FaqDetail.create({ question: '${data.question}' })`);
+    }
+    return newRecord;
+};
+
 const faq_type_list = async (req, res, next) => {
     try {
         const { FaqType } = db.models;
@@ -70,19 +152,14 @@ const faq_type_set = async (req, res, next) => {
     const { id, name, order, enabled } = req.body;
     try {
         const { FaqType } = db.models;
+        const type_id = parseNumericId(id);
 
-        let type_id = id && validator.isNumeric(id.toString()) ? parseInt(id) : 0;
-        if (!name || name.length <= 0) {
+        if (!name?.length) {
             return res.status(200).json(success(false, res.statusCode, "Please enter faq type.", null));
         }
 
-        // Check for duplicate
         const existingType = await FaqType.findOne({
-            where: {
-                type_id: { [Op.ne]: type_id },
-                faq_type: name,
-                is_deleted: false
-            },
+            where: { type_id: { [Op.ne]: type_id }, faq_type: name, is_deleted: false },
             raw: true
         });
 
@@ -90,74 +167,20 @@ const faq_type_set = async (req, res, next) => {
             return res.status(200).json(success(false, res.statusCode, "Faq type is already exists.", null));
         }
 
+        const data = { faq_type: name, sort_order: order, is_enabled: enabled };
+
         if (type_id > 0) {
-            // Get old record for logging
-            const oldRecord = await FaqType.findOne({
-                where: { type_id: type_id, is_deleted: false },
-                raw: true
-            });
-
-            const [affectedRows] = await FaqType.update(
-                {
-                    faq_type: name,
-                    sort_order: order,
-                    is_enabled: enabled,
-                    modify_date: db.get_ist_current_date(),
-                    modify_by: req.token_data.account_id
-                },
-                { where: { type_id: type_id } }
-            );
-
-            if (affectedRows > 0) {
-                try {
-                    let data_to_log = {
-                        correlation_id: correlator.getId(),
-                        token_id: req.token_data.token_id,
-                        account_id: req.token_data.account_id,
-                        user_type: 1,
-                        user_id: req.token_data.admin_id,
-                        narration: 'FAQ type updated. FAQ type name = ' + (oldRecord?.faq_type == name ? name : oldRecord?.faq_type + ' to ' + name),
-                        query: `FaqType.update({ faq_type: '${name}', sort_order: ${order}, is_enabled: ${enabled} }, { where: { type_id: ${type_id} }})`,
-                        date_time: db.get_ist_current_date(),
-                    }
-                    action_logger.info(JSON.stringify(data_to_log));
-                } catch (_) { }
-
-                return res.status(200).json(success(true, res.statusCode, "Updated successfully.", null));
-            } else {
-                return res.status(200).json(success(false, res.statusCode, "Unable to update, Please try again", null));
-            }
-        } else {
-            const newRecord = await FaqType.create({
-                faq_type: name,
-                sort_order: order,
-                is_enabled: enabled,
-                added_by: req.token_data.account_id,
-                modify_by: req.token_data.account_id,
-                added_date: db.get_ist_current_date(),
-                modify_date: db.get_ist_current_date()
-            });
-
-            if (newRecord && newRecord.type_id > 0) {
-                try {
-                    let data_to_log = {
-                        correlation_id: correlator.getId(),
-                        token_id: req.token_data.token_id,
-                        account_id: req.token_data.account_id,
-                        user_type: 1,
-                        user_id: req.token_data.admin_id,
-                        narration: 'New FAQ type added. FAQ type name = ' + name,
-                        query: `FaqType.create({ faq_type: '${name}', sort_order: ${order}, is_enabled: ${enabled} })`,
-                        date_time: db.get_ist_current_date(),
-                    }
-                    action_logger.info(JSON.stringify(data_to_log));
-                } catch (_) { }
-
-                return res.status(200).json(success(true, res.statusCode, "Saved successfully.", null));
-            } else {
-                return res.status(200).json(success(false, res.statusCode, "Unable to save, Please try again", null));
-            }
+            const oldRecord = await FaqType.findOne({ where: { type_id, is_deleted: false }, raw: true });
+            const affectedRows = await updateFaqType(FaqType, type_id, data, req.token_data, oldRecord, name);
+            return affectedRows > 0
+                ? res.status(200).json(success(true, res.statusCode, "Updated successfully.", null))
+                : res.status(200).json(success(false, res.statusCode, "Unable to update, Please try again", null));
         }
+
+        const newRecord = await createFaqType(FaqType, data, req.token_data);
+        return newRecord?.type_id > 0
+            ? res.status(200).json(success(true, res.statusCode, "Saved successfully.", null))
+            : res.status(200).json(success(false, res.statusCode, "Unable to save, Please try again", null));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
@@ -197,7 +220,7 @@ const faq_type_toggle = async (req, res, next) => {
                     account_id: req.token_data.account_id,
                     user_type: 1,
                     user_id: req.token_data.admin_id,
-                    narration: 'FAQ type ' + (row.is_enabled == true ? 'disabled' : 'enabled') + '. Faq type name = ' + row.faq_type,
+                    narration: 'FAQ type ' + (row.is_enabled ? 'disabled' : 'enabled') + '. Faq type name = ' + row.faq_type,
                     query: `FaqType.update({ is_enabled: ${newEnabledStatus} }, { where: { type_id: ${id} }})`,
                     date_time: db.get_ist_current_date(),
                 }
@@ -351,28 +374,21 @@ const faq_detail_set = async (req, res, next) => {
     const { id, type_id, question, answer, order } = req.body;
     try {
         const { FaqDetail } = db.models;
-
-        let _id = id && validator.isNumeric(id.toString()) ? parseInt(id) : 0;
-        let _type_id = type_id && validator.isNumeric(type_id.toString()) ? parseInt(type_id) : 0;
+        const _id = parseNumericId(id);
+        const _type_id = parseNumericId(type_id);
 
         if (_type_id <= 0) {
             return res.status(200).json(success(false, res.statusCode, "Please select FAQ type.", null));
         }
-        if (!question || question.length <= 0) {
+        if (!question?.length) {
             return res.status(200).json(success(false, res.statusCode, "Please enter question.", null));
         }
-        if (!answer || answer.length <= 0) {
+        if (!answer?.length) {
             return res.status(200).json(success(false, res.statusCode, "Please enter answer.", null));
         }
 
-        // Check for duplicate
         const existingFaq = await FaqDetail.findOne({
-            where: {
-                faq_id: { [Op.ne]: _id },
-                type_id: _type_id,
-                question: question,
-                is_deleted: false
-            },
+            where: { faq_id: { [Op.ne]: _id }, type_id: _type_id, question, is_deleted: false },
             raw: true
         });
 
@@ -380,71 +396,19 @@ const faq_detail_set = async (req, res, next) => {
             return res.status(200).json(success(false, res.statusCode, "Faq question is already exists.", null));
         }
 
+        const data = { type_id: _type_id, question, answer, sort_order: order };
+
         if (_id > 0) {
-            const [affectedRows] = await FaqDetail.update(
-                {
-                    type_id: _type_id,
-                    question: question,
-                    answer: answer,
-                    sort_order: order,
-                    modify_date: db.get_ist_current_date(),
-                    modify_by: req.token_data.account_id
-                },
-                { where: { faq_id: _id } }
-            );
-
-            if (affectedRows > 0) {
-                try {
-                    let data_to_log = {
-                        correlation_id: correlator.getId(),
-                        token_id: req.token_data.token_id,
-                        account_id: req.token_data.account_id,
-                        user_type: 1,
-                        user_id: req.token_data.admin_id,
-                        narration: 'FAQ details updated. Question name =' + question,
-                        query: `FaqDetail.update({ type_id: ${_type_id}, question: '${question}' }, { where: { faq_id: ${_id} }})`,
-                        date_time: db.get_ist_current_date(),
-                    }
-                    action_logger.info(JSON.stringify(data_to_log));
-                } catch (_) { }
-
-                return res.status(200).json(success(true, res.statusCode, "Updated Successfully.", null));
-            } else {
-                return res.status(200).json(success(false, res.statusCode, "Unable to update, Please try again", null));
-            }
-        } else {
-            const newRecord = await FaqDetail.create({
-                type_id: _type_id,
-                question: question,
-                answer: answer,
-                sort_order: order,
-                is_enabled: true,
-                added_by: req.token_data.account_id,
-                modify_by: req.token_data.account_id,
-                added_date: db.get_ist_current_date(),
-                modify_date: db.get_ist_current_date()
-            });
-
-            if (newRecord && newRecord.faq_id > 0) {
-                try {
-                    let data_to_log = {
-                        correlation_id: correlator.getId(),
-                        token_id: req.token_data.token_id,
-                        account_id: req.token_data.account_id,
-                        user_type: 1,
-                        user_id: req.token_data.admin_id,
-                        narration: 'New FAQ details added. Question name = ' + question,
-                        query: `FaqDetail.create({ type_id: ${_type_id}, question: '${question}' })`,
-                        date_time: db.get_ist_current_date(),
-                    }
-                    action_logger.info(JSON.stringify(data_to_log));
-                } catch (_) { }
-
-                return res.status(200).json(success(true, res.statusCode, "Saved successfully.", null));
-            } else {
-                return res.status(200).json(success(false, res.statusCode, "Unable to save, Please try again", null));
-            }
+            const affectedRows = await updateFaqDetail(FaqDetail, _id, data, req.token_data, question);
+            return affectedRows > 0
+                ? res.status(200).json(success(true, res.statusCode, "Updated Successfully.", null))
+                : res.status(200).json(success(false, res.statusCode, "Unable to update, Please try again", null));
         }
+
+        const newRecord = await createFaqDetail(FaqDetail, data, req.token_data);
+        return newRecord?.faq_id > 0
+            ? res.status(200).json(success(true, res.statusCode, "Saved successfully.", null))
+            : res.status(200).json(success(false, res.statusCode, "Unable to save, Please try again", null));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
@@ -484,7 +448,7 @@ const faq_detail_toggle = async (req, res, next) => {
                     account_id: req.token_data.account_id,
                     user_type: 1,
                     user_id: req.token_data.admin_id,
-                    narration: 'FAQ details ' + (row.is_enabled == true ? 'disabled' : 'enabled') + '. Faq question = ' + row.question,
+                    narration: 'FAQ details ' + (row.is_enabled ? 'disabled' : 'enabled') + '. Faq question = ' + row.question,
                     query: `FaqDetail.update({ is_enabled: ${newEnabledStatus} }, { where: { faq_id: ${id} }})`,
                     date_time: db.get_ist_current_date(),
                 }

@@ -807,7 +807,7 @@ const product_detail_update = async (req, res, next) => {
             db.delete_uploaded_files(req);
         });
         const { product_id } = req.body;
-        const { key_featurs, product_note, description, api_doc_version, catalogue_sort_order, product_sort_order, category_id } = req.body;
+        const {  product_note,  api_doc_version, catalogue_sort_order, product_sort_order, category_id } = req.body;
         let _product_id = product_id && validator.isNumeric(product_id.toString()) ? parseInt(product_id) : 0;
         let _category_id = category_id && validator.isNumeric(category_id.toString()) ? parseInt(category_id) : 0;
         if (_category_id <= 0) {
@@ -844,7 +844,7 @@ const product_detail_update = async (req, res, next) => {
                 } catch (_) { }
             }
 
-            let flow_chart_res = ""; let flow_chartFilename = "";
+            let flow_chart_res = ""; 
             if (req.files['flow_chart']) {
                 try {
                     const fi = req.files['flow_chart'][0];
