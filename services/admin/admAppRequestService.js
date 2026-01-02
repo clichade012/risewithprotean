@@ -597,7 +597,10 @@ const insertProductData = async (appId) => {
 };
 
 // Helper: Process checker/admin approval with Apigee
-const processCheckerAdminApproval = async (CstAppMast, CstAppProduct, Product, appId, tokenData, remark, appData, is_admin) => {
+const processCheckerAdminApproval = async (models, approvalContext) => {
+    const { CstAppMast, CstAppProduct, Product } = models;
+    const { appId, tokenData, remark, appData, is_admin } = approvalContext;
+
     const appProducts = await CstAppProduct.findAll({
         where: { app_id: appId },
         include: [{ model: Product, as: 'product', attributes: ['product_id', 'product_name'], required: true }]
@@ -651,7 +654,8 @@ const processCheckerAdminApproval = async (CstAppMast, CstAppProduct, Product, a
 
     const kvm_input = buildKvmInput(ip_addresses, cert_public_key);
     await updateApigeeKvm(apigee_app_id, kvm_input, appData.in_live_env, apigeeAuth, CstAppMast, appId);
-    logApprovalAction(tokenData, appData, is_admin ? 'admin' : 'checker');
+    const approverType = is_admin ? 'admin' : 'checker';
+    logApprovalAction(tokenData, appData, approverType);
     await insertCustomerAppData(appId, appData, apigee_app_id, approval_response);
 
     return { success: true, message: "App approved successfully." };
@@ -712,7 +716,9 @@ const app_req_approve = async (req, res, next) => {
         if (is_maker) {
             result = await processMakerApproval(CstAppMast, _app_id, req.token_data, remark, appInfo);
         } else {
-            result = await processCheckerAdminApproval(CstAppMast, CstAppProduct, Product, _app_id, req.token_data, remark, appInfo, is_admin);
+            const models = { CstAppMast, CstAppProduct, Product };
+            const approvalContext = { appId: _app_id, tokenData: req.token_data, remark, appData: appInfo, is_admin };
+            result = await processCheckerAdminApproval(models, approvalContext);
         }
 
         return res.status(200).json(success(result.success, res.statusCode, result.message, null));
@@ -753,6 +759,13 @@ const logRejectionAction = (tokenData, appData, rejecterType) => {
     } catch (_) { /* ignore logging errors */ }
 };
 
+// Helper: Determine rejecter type
+const getRejecterType = (is_maker, is_admin) => {
+    if (is_maker) return 'maker';
+    if (is_admin) return 'admin';
+    return 'checker';
+};
+
 // Helper: Process rejection
 const processRejection = async (CstAppMast, appId, tokenData, remark, appData, is_maker, is_admin) => {
     const updateData = is_maker
@@ -772,7 +785,7 @@ const processRejection = async (CstAppMast, appId, tokenData, remark, appData, i
     const [affectedRows] = await CstAppMast.update(updateData, { where: { app_id: appId } });
 
     if (affectedRows > 0) {
-        const rejecterType = is_maker ? 'maker' : (is_admin ? 'admin' : 'checker');
+        const rejecterType = getRejecterType(is_maker, is_admin);
         logRejectionAction(tokenData, appData, rejecterType);
         return { success: true, message: "App rejected successfully." };
     }
@@ -977,7 +990,10 @@ const logStatusChangeAction = (tokenData, appData, customerData, apigee_status) 
 };
 
 // Helper: Process status change in database
-const processStatusChange = async (CstAppMast, CstAppStatus, appId, tokenData, status_remark, apigee_status, appData, customerData) => {
+const processStatusChange = async (models, statusContext) => {
+    const { CstAppMast, CstAppStatus } = models;
+    const { appId, tokenData, status_remark, apigee_status, appData, customerData } = statusContext;
+
     const [affectedRows] = await CstAppMast.update(
         {
             apigee_status: apigee_status,
@@ -1044,7 +1060,9 @@ const app_req_status_change = async (req, res, next) => {
         }
 
         const appInfo = { ...appData, in_live_env: !!appData.in_live_env };
-        const result = await processStatusChange(CstAppMast, CstAppStatus, _app_id, req.token_data, status_remark, apigee_status, appInfo, customerData);
+        const models = { CstAppMast, CstAppStatus };
+        const statusContext = { appId: _app_id, tokenData: req.token_data, status_remark, apigee_status, appData: appInfo, customerData };
+        const result = await processStatusChange(models, statusContext);
         return res.status(200).json(success(result.success, res.statusCode, result.message, null));
     } catch (err) {
         _logger.error(err.stack);
@@ -1067,24 +1085,31 @@ const extractServiceRatios = (services) => {
     return { Ratio_Signzy, Ratio_Karza };
 };
 
+// Helper: Validate a single tab
+const validateSingleTab = (tab, product_id) => {
+    if (!tab.isSelectedTab) return null;
+
+    const tabType = tab.name.split(/(\d+)/)[0];
+    if (tabType === 'Split') {
+        const { Ratio_Signzy, Ratio_Karza } = extractServiceRatios(tab.services || []);
+        if (!Ratio_Signzy) {
+            return { valid: false, message: `Please insert value for Signzy in product tab: ${product_id}` };
+        }
+        if (!Ratio_Karza) {
+            return { valid: false, message: `Please insert value for Karza in product tab: ${product_id}` };
+        }
+    } else if (!tab.selectedService) {
+        return { valid: false, message: `Please select a service in product: ${product_id}` };
+    }
+    return null;
+};
+
 // Helper: Validate routing logic input
 const validateRoutingLogic = (app_routing_logic) => {
     for (const [product_id, tabs] of Object.entries(app_routing_logic)) {
         for (const tab of tabs) {
-            if (!tab.isSelectedTab) continue;
-
-            const tabType = tab.name.split(/(\d+)/)[0];
-            if (tabType === 'Split') {
-                const { Ratio_Signzy, Ratio_Karza } = extractServiceRatios(tab.services || []);
-                if (!Ratio_Signzy) {
-                    return { valid: false, message: `Please insert value for Signzy in product tab: ${product_id}` };
-                }
-                if (!Ratio_Karza) {
-                    return { valid: false, message: `Please insert value for Karza in product tab: ${product_id}` };
-                }
-            } else if (!tab.selectedService) {
-                return { valid: false, message: `Please select a service in product: ${product_id}` };
-            }
+            const validationError = validateSingleTab(tab, product_id);
+            if (validationError) return validationError;
         }
     }
     return { valid: true };
