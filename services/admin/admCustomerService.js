@@ -122,42 +122,38 @@ const softDeleteCustomerRecords = async (models, customer_id, tokenData, email_i
     return true;
 };
 
+// Helper: Validate required string field
+const validateRequiredString = (value, fieldName, maxLength = 0) => {
+    if (!value?.length) return `Please enter ${fieldName}.`;
+    if (maxLength > 0 && value.length > maxLength) return `${fieldName} should not be more than ${maxLength} character`;
+    return null;
+};
+
+// Helper: Validate required numeric field
+const validateRequiredNumeric = (value, fieldName) => {
+    if (!value || !validator.isNumeric(value.toString()) || value <= 0) return `Please select ${fieldName}.`;
+    return null;
+};
+
 // Helper: Validate registration fields
 const validateRegistrationFields = (data, res) => {
-    const { first_name, last_name, network_id, mobile_no, email_id, industry_id, company_name, password } = data;
+    const { first_name, last_name, network_id, mobile_no, email_id, industry_id, company_name } = data;
 
-    if (!first_name || first_name.length <= 0) {
-        return { valid: false, response: res.status(200).json(success(false, res.statusCode, "Please enter first name.", null)) };
-    }
-    if (first_name.length > 30) {
-        return { valid: false, response: res.status(200).json(success(false, res.statusCode, "First name should not be more than 30 character", null)) };
-    }
-    if (!last_name || last_name.length <= 0) {
-        return { valid: false, response: res.status(200).json(success(false, res.statusCode, "Please enter last name.", null)) };
-    }
-    if (last_name.length > 30) {
-        return { valid: false, response: res.status(200).json(success(false, res.statusCode, "Last name should not be more than 30 character", null)) };
-    }
-    if (!network_id || !validator.isNumeric(network_id.toString()) || network_id <= 0) {
-        return { valid: false, response: res.status(200).json(success(false, res.statusCode, "Please select country code.", null)) };
-    }
-    if (!mobile_no || mobile_no.length <= 0) {
-        return { valid: false, response: res.status(200).json(success(false, res.statusCode, "Please enter mobile number.", null)) };
-    }
-    if ((mobile_no && mobile_no.length > 0 && !validator.isNumeric(mobile_no)) || mobile_no.length != 10) {
-        return { valid: false, response: res.status(200).json(success(false, res.statusCode, "Invalid mobile number.", null)) };
-    }
-    if (!email_id || email_id.length <= 0) {
-        return { valid: false, response: res.status(200).json(success(false, res.statusCode, "Please enter email address.", null)) };
-    }
-    if (email_id && email_id.length > 0 && !validator.isEmail(email_id)) {
-        return { valid: false, response: res.status(200).json(success(false, res.statusCode, "Invalid email address.", null)) };
-    }
-    if (!industry_id || !validator.isNumeric(industry_id.toString()) || industry_id <= 0) {
-        return { valid: false, response: res.status(200).json(success(false, res.statusCode, "Please select business category.", null)) };
-    }
-    if (!company_name || company_name.length <= 0) {
-        return { valid: false, response: res.status(200).json(success(false, res.statusCode, "Please enter company name.", null)) };
+    const validations = [
+        validateRequiredString(first_name, 'first name', 30),
+        validateRequiredString(last_name, 'last name', 30),
+        validateRequiredNumeric(network_id, 'country code'),
+        validateRequiredString(mobile_no, 'mobile number'),
+        (!validator.isNumeric(mobile_no || '') || mobile_no?.length !== 10) ? 'Invalid mobile number.' : null,
+        validateRequiredString(email_id, 'email address'),
+        (email_id?.length > 0 && !validator.isEmail(email_id)) ? 'Invalid email address.' : null,
+        validateRequiredNumeric(industry_id, 'business category'),
+        validateRequiredString(company_name, 'company name'),
+    ];
+
+    const errorMsg = validations.find(v => v !== null);
+    if (errorMsg) {
+        return { valid: false, response: res.status(200).json(success(false, res.statusCode, errorMsg, null)) };
     }
     return { valid: true };
 };
@@ -486,6 +482,29 @@ const writeAnalyticsRowsToWorksheet = (pageData, worksheet, isAdmin, mapFunction
     });
 };
 
+// Helper: Process Excel rows with sheet management
+const processExcelRowsWithSheetManagement = (pageData, context) => {
+    const { workbook, isAdmin, maxRowsPerSheet, addHeaders } = context;
+    let { worksheet, sheetIndex, currentRow } = context;
+
+    for (const row of pageData) {
+        if (currentRow >= maxRowsPerSheet) {
+            worksheet.commit();
+            sheetIndex++;
+            worksheet = workbook.addWorksheet(`Sheet ${sheetIndex}`);
+            addHeaders(worksheet);
+            currentRow = 0;
+        }
+        try {
+            worksheet.addRow(mapAnalyticsRowForGenerate(row, isAdmin)).commit();
+            currentRow++;
+        } catch (err) {
+            console.log("Error adding row to worksheet:", err);
+        }
+    }
+    return { worksheet, sheetIndex, currentRow };
+};
+
 const customer_search_list = async (req, res, next) => {
     const { page_no, search_text } = req.body;
     try {
@@ -740,19 +759,19 @@ const customer_to_activate = async (req, res, next) => {
 };
 
 // Helper: Create developer in Apigee
-async function createApigeeDeveloper(customerData) {
-    const { first_name, last_name, email_id } = customerData;
-    const product_URL = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/developers`;
-    const data = { firstName: first_name, lastName: last_name, userName: email_id, email: email_id };
+// async function createApigeeDeveloper(customerData) {
+//     const { first_name, last_name, email_id } = customerData;
+//     const product_URL = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/developers`;
+//     const data = { firstName: first_name, lastName: last_name, userName: email_id, email: email_id };
 
-    const apigeeAuth = await db.get_apigee_token();
-    const response = await fetch(product_URL, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${apigeeAuth}`, "Content-Type": "application/json" },
-        body: JSON.stringify(data),
-    });
-    return response.json();
-}
+//     const apigeeAuth = await db.get_apigee_token();
+//     const response = await fetch(product_URL, {
+//         method: "POST",
+//         headers: { Authorization: `Bearer ${apigeeAuth}`, "Content-Type": "application/json" },
+//         body: JSON.stringify(data),
+//     });
+//     return response.json();
+// }
 
 // Helper: Handle successful customer approval
 async function handleApprovalSuccess(req, customerId, customer, developerId, responseData) {
@@ -2173,17 +2192,18 @@ const generateExcelFile = async (req, options) => {
         const isAdmin = roleName === 'Administrator';
         const table_name = type === 1 ? 'apigee_logs_prod' : 'apigee_logs';
         const pageSize = 20000;
-        const maxRowsPerSheet = 1048576;
 
         const workbook = new excel.stream.xlsx.WorkbookWriter({ filename: filePath });
-        let worksheet = workbook.addWorksheet('Sheet 1');
-        let sheetIndex = 1;
-        let currentRow = 0;
+        const addHeaders = (ws) => ws.addRow(getAnalyticsGenerateHeaders(isAdmin)).commit();
+
+        let context = {
+            workbook, isAdmin, maxRowsPerSheet: 1048576, addHeaders,
+            worksheet: workbook.addWorksheet('Sheet 1'), sheetIndex: 1, currentRow: 0
+        };
+        addHeaders(context.worksheet);
+
         let currentPage = 1;
         let hasMoreData = true;
-
-        const addHeaders = (ws) => ws.addRow(getAnalyticsGenerateHeaders(isAdmin)).commit();
-        addHeaders(worksheet);
 
         while (hasMoreData) {
             const { conditions, replacements } = buildAnalyticsGenerateConditions({
@@ -2202,21 +2222,7 @@ const generateExcelFile = async (req, options) => {
             const pageData = await db.sequelize2.query(query, { replacements, type: QueryTypes.SELECT, raw: true });
 
             if (pageData?.length > 0) {
-                for (const row of pageData) {
-                    if (currentRow >= maxRowsPerSheet) {
-                        worksheet.commit();
-                        sheetIndex++;
-                        worksheet = workbook.addWorksheet(`Sheet ${sheetIndex}`);
-                        addHeaders(worksheet);
-                        currentRow = 0;
-                    }
-                    try {
-                        worksheet.addRow(mapAnalyticsRowForGenerate(row, isAdmin)).commit();
-                        currentRow++;
-                    } catch (err) {
-                        console.log("Error adding row to worksheet:", err);
-                    }
-                }
+                context = processExcelRowsWithSheetManagement(pageData, context);
                 currentPage++;
             } else {
                 hasMoreData = false;

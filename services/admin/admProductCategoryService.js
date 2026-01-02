@@ -6,6 +6,45 @@ import dateFormat from 'date-format';
 import validator from 'validator';
 import correlator from 'express-correlation-id';
 
+// Helper: Parse numeric value
+const parseNumericId = (value, defaultVal = 0) => {
+    return value && validator.isNumeric(value.toString()) ? parseInt(value) : defaultVal;
+};
+
+// Helper: Update existing category
+const updateCategory = async (ProductCategory, categoryId, name, order, groupTypeId, accountId) => {
+    const oldCategory = await ProductCategory.findOne({
+        where: { category_id: categoryId, is_deleted: false },
+        raw: true
+    });
+
+    const [affectedRows] = await ProductCategory.update(
+        {
+            category_name: name,
+            order_by: order,
+            group_type: groupTypeId,
+            modify_date: db.get_ist_current_date(),
+            modify_by: accountId
+        },
+        { where: { category_id: categoryId } }
+    );
+
+    return { affectedRows, oldName: oldCategory?.category_name || "" };
+};
+
+// Helper: Create new category
+const createCategory = async (ProductCategory, name, order, groupTypeId, accountId) => {
+    const newCategory = await ProductCategory.create({
+        category_name: name,
+        order_by: order,
+        group_type: groupTypeId,
+        added_by: accountId,
+        modify_by: accountId,
+        added_date: db.get_ist_current_date(),
+        modify_date: db.get_ist_current_date()
+    });
+    return newCategory?.category_id ?? 0;
+};
 
 const productCategoryList = async (req, res, next) => {
     const { page_no, search_text } = req.body;
@@ -108,20 +147,15 @@ const productCategorySet = async (req, res, next) => {
     try {
         const { ProductCategory } = db.models;
 
-        let categoryId = id && validator.isNumeric(id.toString()) ? parseInt(id) : 0;
-        let groupTypeId = groupType && validator.isNumeric(groupType.toString()) ? parseInt(groupType) : 1;
+        const categoryId = parseNumericId(id);
+        const groupTypeId = parseNumericId(groupType, 1);
 
         if (!name || name.length <= 0) {
             return res.status(200).json(success(false, res.statusCode, "Please enter category.", null));
         }
 
-        // Check for duplicate name
         const existingCategory = await ProductCategory.findOne({
-            where: {
-                category_id: { [Op.ne]: categoryId },
-                category_name: name,
-                is_deleted: false
-            },
+            where: { category_id: { [Op.ne]: categoryId }, category_name: name, is_deleted: false },
             raw: true
         });
 
@@ -130,54 +164,27 @@ const productCategorySet = async (req, res, next) => {
         }
 
         if (categoryId > 0) {
-            // Update existing category
-            const oldCategory = await ProductCategory.findOne({
-                where: { category_id: categoryId, is_deleted: false },
-                raw: true
-            });
+            const { affectedRows, oldName } = await updateCategory(ProductCategory, categoryId, name, order, groupTypeId, req.token_data.account_id);
 
-            const [affectedRows] = await ProductCategory.update(
-                {
-                    category_name: name,
-                    order_by: order,
-                    group_type: groupTypeId,
-                    modify_date: db.get_ist_current_date(),
-                    modify_by: req.token_data.account_id
-                },
-                {
-                    where: { category_id: categoryId }
-                }
-            );
-
-            if (affectedRows > 0) {
-                const oldName = oldCategory?.category_name || "";
-                const narration = oldName && oldName !== name
-                    ? `Product category updated. Name changed from "${oldName}" to "${name}"`
-                    : `Product category updated. Name = "${name}"`;
-                logAction(req, narration, 'UPDATE', { categoryId, name, order, groupTypeId });
-                return res.status(200).json(success(true, res.statusCode, "Updated successfully.", null));
-            } else {
+            if (affectedRows <= 0) {
                 return res.status(200).json(success(false, res.statusCode, "Unable to update, Please try again", null));
             }
-        } else {
-            // Create new category
-            const newCategory = await ProductCategory.create({
-                category_name: name,
-                order_by: order,
-                group_type: groupTypeId,
-                added_by: req.token_data.account_id,
-                modify_by: req.token_data.account_id,
-                added_date: db.get_ist_current_date(),
-                modify_date: db.get_ist_current_date()
-            });
 
-            if (newCategory && newCategory.category_id > 0) {
-                logAction(req, `New category added. Category name = ${name}`, 'INSERT', { name, order, groupTypeId });
-                return res.status(200).json(success(true, res.statusCode, "Saved successfully.", null));
-            } else {
-                return res.status(200).json(success(false, res.statusCode, "Unable to save, Please try again", null));
-            }
+            const narration = oldName && oldName !== name
+                ? `Product category updated. Name changed from "${oldName}" to "${name}"`
+                : `Product category updated. Name = "${name}"`;
+            logAction(req, narration, 'UPDATE', { categoryId, name, order, groupTypeId });
+            return res.status(200).json(success(true, res.statusCode, "Updated successfully.", null));
         }
+
+        const newCategoryId = await createCategory(ProductCategory, name, order, groupTypeId, req.token_data.account_id);
+
+        if (newCategoryId <= 0) {
+            return res.status(200).json(success(false, res.statusCode, "Unable to save, Please try again", null));
+        }
+
+        logAction(req, `New category added. Category name = ${name}`, 'INSERT', { name, order, groupTypeId });
+        return res.status(200).json(success(true, res.statusCode, "Saved successfully.", null));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
