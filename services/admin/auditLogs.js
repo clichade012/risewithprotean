@@ -8,120 +8,139 @@ import { MongoClient } from 'mongodb';
 // Helper function to get models - must be called after db is initialized
 const getModels = () => db.models;
 
-const api_history_logs = async (req, res, next) => {
-    const { page_no, userType, search_text, from_date, upto_date } = req.body;
-    let _page_no = page_no && validator.isNumeric(page_no.toString()) ? parseInt(page_no) : 0; if (_page_no <= 0) { _page_no = 1; }
-    let _userType = userType && validator.isNumeric(userType.toString()) ? parseInt(userType) : 0;
-    let _search_text = ''; if (search_text && search_text.length > 0) { _search_text = search_text; }
-    // const client = new MongoClient(process.env.MONGO_DB_URL, { useNewUrlParser: true, useUnifiedTopology: true });
-    const client = new MongoClient(process.env.MONGO_DB_URL, {
-        serverSelectionTimeoutMS: 10000, // Increase timeout
-    });
-    try {
-        const { AdmUser, CstCustomer } = getModels();
-
-        await client.connect();
-        const database = client.db(process.env.MONGO_DB_NAME);
-        const collection = database.collection('api_call_logs');
-
-        const tmpDate = new Date();
-        const currDate = new Date(tmpDate.getFullYear(), tmpDate.getMonth(), tmpDate.getDate(), 0, 0, 0, 0);
-        let newDate = dateFormat('yyyy-MM-dd hh:mm:ss', currDate);
-
-        const filter = {};
-        filter.timestamp = {
-            $gte: db.string_to_date(from_date && from_date.length > 0 ? from_date : newDate),
-            $lt: db.upto_date(db.string_to_date(upto_date && upto_date.length > 0 ? upto_date : newDate))
-        };
-        if (_userType > 0 || _search_text.length > 0) {
-            filter.$and = [];
-            if (_userType > 0) {
-                filter.$and.push({ message: { $regex: '"user_type":' + _userType + ',', $options: 'i' } });
-            }
-            if (_search_text.length > 0) {
-                filter.$and.push({ message: { $regex: _search_text, $options: 'i' } });
-            }
-        }
-        const documentCount = await collection.countDocuments(filter);
-        const documents = await collection.find(filter).skip((_page_no - 1) * parseInt(process.env.PAGINATION_SIZE)).limit(parseInt(process.env.PAGINATION_SIZE)).toArray();
-
-        let log_data = [];
-        if (documents) {
-            for (let i = 0; i < documents.length; i++) {
-                const item = documents[i];
-                const log_object = db.convertStringToJson(item.message);
-                if (log_object != null) {
-                    let full_name = ""; let email_id = "";
-                    if (log_object.user_type && log_object.user_type == 1) {
-                        // SELECT FROM adm_user - Using ORM
-                        const row1 = await AdmUser.findOne({
-                            where: { admin_id: log_object.table_id },
-                            attributes: ['first_name', 'last_name', 'email_id']
-                        });
-                        if (row1) {
-                            full_name = `${row1.first_name || ''} ${row1.last_name || ''}`.trim();
-                            email_id = row1.email_id;
-                        }
-                    }
-                    if (log_object.user_type && log_object.user_type == 2) {
-                        // SELECT FROM cst_customer - Using ORM
-                        const row1 = await CstCustomer.findOne({
-                            where: { customer_id: log_object.table_id },
-                            attributes: ['first_name', 'last_name', 'email_id']
-                        });
-                        if (row1) {
-                            full_name = `${row1.first_name || ''} ${row1.last_name || ''}`.trim();
-                            email_id = row1.email_id;
-                        }
-                    }
-                    log_data.push({
-                        seq_no: ((_page_no - 1) * parseInt(process.env.PAGINATION_SIZE) + (i + 1)),
-                        correlation_id: log_object.correlation_id,
-                        full_name: full_name,
-                        email_id: email_id,
-                        url: log_object.url,
-                        method: log_object.method,
-                        ip_address: log_object.ip_address,
-                        date_time: log_object.date_time ? db.convert_dateformat(log_object.date_time) : '',
-                        user_type: log_object.user_type,
-                        payload: log_object.payload,
-                        response: log_object.response,
-                    });
-                } else {
-                    log_data.push({
-                        seq_no: ((_page_no - 1) * parseInt(process.env.PAGINATION_SIZE) + (i + 1)),
-                        correlation_id: '',
-                        full_name: '',
-                        email_id: '',
-                        url: '',
-                        method: '',
-                        ip_address: '',
-                        date_time: '',
-                        user_type: '',
-                        payload: '',
-                        response: '',
-                    });
-                }
-            }
-        }
-        let results = {
-            total_record: documentCount,
-            current_page: _page_no,
-            page_size: parseInt(process.env.PAGINATION_SIZE),
-            log_data: log_data,
-        }
-        return res.status(200).json(success(true, res.statusCode, "Audit Logs.", results));
-    } catch (err) {
-        console.log(err.stack)
-        _logger.error(err.stack);
-        await client.close();
-        return res.status(500).json(success(false, res.statusCode, err.message, null));
-    }
+// Helper: Parse numeric value with default
+const parseNumericWithDefault = (value, defaultVal = 0) => {
+    return value && validator.isNumeric(value.toString()) ? parseInt(value) : defaultVal;
 };
 
+// Helper: Get current date string
+const getCurrentDateString = () => {
+    const tmpDate = new Date();
+    const currDate = new Date(tmpDate.getFullYear(), tmpDate.getMonth(), tmpDate.getDate(), 0, 0, 0, 0);
+    return dateFormat('yyyy-MM-dd hh:mm:ss', currDate);
+};
+
+// Helper: Build date filter for MongoDB
+const buildDateFilter = (from_date, upto_date) => {
+    const defaultDate = getCurrentDateString();
+    return {
+        $gte: db.string_to_date(from_date?.length > 0 ? from_date : defaultDate),
+        $lt: db.upto_date(db.string_to_date(upto_date?.length > 0 ? upto_date : defaultDate))
+    };
+};
+
+// Helper: Build search filter conditions
+const buildSearchConditions = (userType, searchText) => {
+    const conditions = [];
+    if (userType > 0) {
+        conditions.push({ message: { $regex: '"user_type":' + userType + ',', $options: 'i' } });
+    }
+    if (searchText.length > 0) {
+        conditions.push({ message: { $regex: searchText, $options: 'i' } });
+    }
+    return conditions.length > 0 ? { $and: conditions } : {};
+};
+
+// Helper: Get user info by type
+const getUserInfo = async (userType, userId) => {
+    const { AdmUser, CstCustomer } = getModels();
+    let row = null;
+
+    if (userType === 1) {
+        row = await AdmUser.findOne({
+            where: { admin_id: userId },
+            attributes: ['first_name', 'last_name', 'email_id']
+        });
+    } else if (userType === 2) {
+        row = await CstCustomer.findOne({
+            where: { customer_id: userId },
+            attributes: ['first_name', 'last_name', 'email_id']
+        });
+    }
+
+    if (!row) return { full_name: '', email_id: '' };
+    return {
+        full_name: `${row.first_name || ''} ${row.last_name || ''}`.trim(),
+        email_id: row.email_id || ''
+    };
+};
+
+// Helper: Create empty log entry
+const createEmptyLogEntry = (seq_no, extraFields = {}) => ({
+    seq_no,
+    correlation_id: '',
+    full_name: '',
+    email_id: '',
+    url: '',
+    method: '',
+    ip_address: '',
+    date_time: '',
+    user_type: '',
+    payload: '',
+    response: '',
+    ...extraFields
+});
 
 
 
+const api_history_logs = async (req, res, next) => {
+    const { page_no, userType, search_text, from_date, upto_date } = req.body;
+    const _page_no = Math.max(1, parseNumericWithDefault(page_no, 1));
+    const _userType = parseNumericWithDefault(userType);
+    const _search_text = search_text?.length > 0 ? search_text : '';
+    const pageSize = parseInt(process.env.PAGINATION_SIZE);
+
+    const client = new MongoClient(process.env.MONGO_DB_URL, { serverSelectionTimeoutMS: 10000 });
+
+    try {
+        await client.connect();
+        const collection = client.db(process.env.MONGO_DB_NAME).collection('api_call_logs');
+
+        const filter = {
+            timestamp: buildDateFilter(from_date, upto_date),
+            ...buildSearchConditions(_userType, _search_text)
+        };
+
+        const documentCount = await collection.countDocuments(filter);
+        const documents = await collection.find(filter).skip((_page_no - 1) * pageSize).limit(pageSize).toArray();
+
+        const log_data = await Promise.all((documents || []).map(async (item, i) => {
+            const seq_no = (_page_no - 1) * pageSize + (i + 1);
+            const log_object = db.convertStringToJson(item.message);
+
+            if (!log_object) return createEmptyLogEntry(seq_no);
+
+            const userInfo = await getUserInfo(log_object.user_type, log_object.table_id);
+
+            return {
+                seq_no,
+                correlation_id: log_object.correlation_id,
+                full_name: userInfo.full_name,
+                email_id: userInfo.email_id,
+                url: log_object.url,
+                method: log_object.method,
+                ip_address: log_object.ip_address,
+                date_time: log_object.date_time ? db.convert_dateformat(log_object.date_time) : '',
+                user_type: log_object.user_type,
+                payload: log_object.payload,
+                response: log_object.response
+            };
+        }));
+
+        const results = {
+            total_record: documentCount,
+            current_page: _page_no,
+            page_size: pageSize,
+            log_data
+        };
+        return res.status(200).json(success(true, res.statusCode, "Audit Logs.", results));
+    } catch (err) {
+        _logger.error(err.stack);
+        return res.status(500).json(success(false, res.statusCode, err.message, null));
+    } finally {
+        await client.close();
+    }
+};
 
 const user_history_logs = async (req, res, next) => {
     const { page_no, userType, search_text, from_date, upto_date } = req.body;

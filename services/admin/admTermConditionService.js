@@ -1,10 +1,31 @@
 import { logger as _logger, action_logger } from '../../logger/winston.js';
 import db from '../../database/db_helper.js';
 import { success } from "../../model/responseModel.js";
-import { QueryTypes, Op } from 'sequelize';
+import {  Op } from 'sequelize';
 import dateFormat from 'date-format';
 import validator from 'validator';
 import correlator from 'express-correlation-id';
+
+// Helper: Parse numeric value with default
+const parseNumericWithDefault = (value, defaultVal = 0) => {
+    return value && validator.isNumeric(value.toString()) ? parseInt(value) : defaultVal;
+};
+
+// Helper: Log action to action_logger
+const logAction = (req, narration, query) => {
+    try {
+        action_logger.info(JSON.stringify({
+            correlation_id: correlator.getId(),
+            token_id: req.token_data.token_id,
+            account_id: req.token_data.account_id,
+            user_type: 1,
+            user_id: req.token_data.admin_id,
+            narration,
+            query: JSON.stringify(query),
+            date_time: db.get_ist_current_date(),
+        }));
+    } catch (_) { }
+};
 
 const term_condition_list = async (req, res, next) => {
     const { page_no, search_text } = req.body;
@@ -82,10 +103,11 @@ const term_condition_list = async (req, res, next) => {
 };
 
 const term_condition_set = async (req, res, next) => {
-    const { id, title, content, order, enabled } = req.body;
+    const { id, title, content, order } = req.body;
     const { TermConditions } = db.models;
     try {
-        let _id = id && validator.isNumeric(id.toString()) ? parseInt(id) : 0;
+        const _id = parseNumericWithDefault(id);
+
         if (!title || title.length <= 0) {
             return res.status(200).json(success(false, res.statusCode, "Please enter side bar menu title.", null));
         }
@@ -94,108 +116,53 @@ const term_condition_set = async (req, res, next) => {
         }
 
         // Check for duplicate title
-        const row1 = await TermConditions.findOne({
-            where: {
-                table_id: { [Op.ne]: _id },
-                sidebar_title: title,
-                is_deleted: false
-            },
+        const existingTitle = await TermConditions.findOne({
+            where: { table_id: { [Op.ne]: _id }, sidebar_title: title, is_deleted: false },
             attributes: ['table_id']
         });
-
-        if (row1) {
+        if (existingTitle) {
             return res.status(200).json(success(false, res.statusCode, "Side bar menu title is already exists.", null));
         }
 
+        // Update existing record
         if (_id > 0) {
-            // Update existing record
-            const row14 = await TermConditions.findOne({
-                where: {
-                    table_id: _id,
-                    is_deleted: false
-                },
+            const existing = await TermConditions.findOne({
+                where: { table_id: _id, is_deleted: false },
                 attributes: ['table_id', 'sidebar_title']
             });
-
-            if (!row14) {
+            if (!existing) {
                 return res.status(200).json(success(false, res.statusCode, "Term & conditions details not found, Please try again.", null));
             }
 
-            const [affectedRows] = await TermConditions.update(
-                {
-                    sidebar_title: title,
-                    term_content: content,
-                    sort_order: order,
-                    modify_by: req.token_data.account_id,
-                    modify_date: db.get_ist_current_date()
-                },
-                {
-                    where: { table_id: _id }
-                }
-            );
+            const [affectedRows] = await TermConditions.update({
+                sidebar_title: title, term_content: content, sort_order: order,
+                modify_by: req.token_data.account_id, modify_date: db.get_ist_current_date()
+            }, { where: { table_id: _id } });
 
-            if (affectedRows > 0) {
-                try {
-                    let data_to_log = {
-                        correlation_id: correlator.getId(),
-                        token_id: req.token_data.token_id,
-                        account_id: req.token_data.account_id,
-                        user_type: 1,
-                        user_id: req.token_data.admin_id,
-                        narration: 'Term & conditions updated. Title name = ' + (row14.sidebar_title == title ? title : row14.sidebar_title + ' to ' + title),
-                        query: JSON.stringify({
-                            table_id: _id,
-                            sidebar_title: title,
-                            term_content: content,
-                            sort_order: order
-                        }),
-                        date_time: db.get_ist_current_date(),
-                    }
-                    action_logger.info(JSON.stringify(data_to_log));
-                } catch (_) { }
-
-                return res.status(200).json(success(true, res.statusCode, "Updated successfully.", null));
-            } else {
+            if (affectedRows <= 0) {
                 return res.status(200).json(success(false, res.statusCode, "Unable to update, Please try again", null));
             }
-        } else {
-            // Create new record
-            const newRecord = await TermConditions.create({
-                sidebar_title: title,
-                term_content: content,
-                sort_order: order,
-                is_enabled: true,
-                added_by: req.token_data.account_id,
-                modify_by: req.token_data.account_id,
-                added_date: db.get_ist_current_date(),
-                modify_date: db.get_ist_current_date()
-            });
 
-            const table_id = newRecord?.table_id ?? 0;
-
-            if (table_id > 0) {
-                try {
-                    let data_to_log = {
-                        correlation_id: correlator.getId(),
-                        token_id: req.token_data.token_id,
-                        account_id: req.token_data.account_id,
-                        user_type: 1,
-                        user_id: req.token_data.admin_id,
-                        narration: 'New term & conditions added. Title name = ' + title,
-                        query: JSON.stringify({
-                            sidebar_title: title,
-                            term_content: content,
-                            sort_order: order
-                        }),
-                        date_time: db.get_ist_current_date(),
-                    }
-                    action_logger.info(JSON.stringify(data_to_log));
-                } catch (_) { }
-                return res.status(200).json(success(true, res.statusCode, "Saved successfully.", null));
-            } else {
-                return res.status(200).json(success(false, res.statusCode, "Unable to save, Please try again", null));
-            }
+            const titleChange = existing.sidebar_title === title ? title : existing.sidebar_title + ' to ' + title;
+            logAction(req, 'Term & conditions updated. Title name = ' + titleChange,
+                { table_id: _id, sidebar_title: title, term_content: content, sort_order: order });
+            return res.status(200).json(success(true, res.statusCode, "Updated successfully.", null));
         }
+
+        // Create new record
+        const newRecord = await TermConditions.create({
+            sidebar_title: title, term_content: content, sort_order: order, is_enabled: true,
+            added_by: req.token_data.account_id, modify_by: req.token_data.account_id,
+            added_date: db.get_ist_current_date(), modify_date: db.get_ist_current_date()
+        });
+
+        if ((newRecord?.table_id ?? 0) <= 0) {
+            return res.status(200).json(success(false, res.statusCode, "Unable to save, Please try again", null));
+        }
+
+        logAction(req, 'New term & conditions added. Title name = ' + title,
+            { sidebar_title: title, term_content: content, sort_order: order });
+        return res.status(200).json(success(true, res.statusCode, "Saved successfully.", null));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
@@ -237,7 +204,7 @@ const term_condition_toggle = async (req, res, next) => {
                     account_id: req.token_data.account_id,
                     user_type: 1,
                     user_id: req.token_data.admin_id,
-                    narration: 'Term & conditions ' + (row1.is_enabled == true ? 'disabled' : 'enabled') + '. Title name = ' + row1.sidebar_title,
+                    narration: 'Term & conditions ' + (row1.is_enabled ? 'disabled' : 'enabled') + '. Title name = ' + row1.sidebar_title,
                     query: JSON.stringify({
                         table_id: id,
                         is_enabled: !row1.is_enabled

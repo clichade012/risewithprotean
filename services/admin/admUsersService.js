@@ -13,226 +13,147 @@ import correlator from 'express-correlation-id';
 // Helper function to get models - must be called after db is initialized
 const getModels = () => db.models;
 
+// Helper: Parse numeric value with default
+const parseNumericWithDefault = (value, defaultVal = 0) => {
+    return value && validator.isNumeric(value.toString()) ? parseInt(value) : defaultVal;
+};
 
-const send_invite_link = async (admin_id) => {
-    const { AdmUser, AdmLinkAct, EmailTemplate } = getModels();
+// Helper: Log action to action_logger
+const logAction = (req, narration, query) => {
+    try {
+        action_logger.info(JSON.stringify({
+            correlation_id: correlator.getId(),
+            token_id: req.token_data.token_id,
+            account_id: req.token_data.account_id,
+            user_type: 1,
+            user_id: req.token_data.admin_id,
+            narration,
+            query,
+            date_time: db.get_ist_current_date(),
+        }));
+    } catch (_) { }
+};
 
-    const row4 = await AdmUser.findOne({
-        where: {
-            admin_id,
-            is_deleted: false
-        },
-        attributes: [
-            'first_name',
-            'last_name',
-            'email_id',
-            'mobile_no',
-            'login_name',
-            'is_enabled',
-            'added_date',
-            'modify_date',
-            'role_id',
-            'is_activated'
-        ]
+// Helper: Replace email template tags
+const replaceEmailTags = (text, userData, extraTags = {}) => {
+    if (!text) return "";
+    let result = text;
+    result = result.replaceAll(process.env.EMAIL_TAG_FIRST_NAME, userData.first_name);
+    result = result.replaceAll(process.env.EMAIL_TAG_LAST_NAME, userData.last_name);
+    result = result.replaceAll(process.env.EMAIL_TAG_EMAIL_ID, userData.email_id);
+    result = result.replaceAll(process.env.EMAIL_TAG_MOBILE_NO, userData.mobile_no);
+    result = result.replaceAll(process.env.SITE_URL_TAG, process.env.FRONT_SITE_URL);
+    Object.entries(extraTags).forEach(([tag, value]) => {
+        result = result.replaceAll(tag, value);
+    });
+    return result;
+};
+
+// Helper: Send email with template
+const sendEmailWithTemplate = async (templateId, userData, extraTags = {}) => {
+    const { EmailTemplate } = getModels();
+    const template = await EmailTemplate.findOne({
+        where: { template_id: templateId },
+        attributes: ['subject', 'body_text', 'is_enabled']
     });
 
-    if (row4) {
-        if (row4.is_activated && row4.is_activated == true) {
-            return -1;      /*Already activated*/
-        }
-        const uuid = randomUUID();
-        const link_data = { page: 'admin_invite', token: uuid.toString(), };
-        const encoded_data = encodeURIComponent(Buffer.from(JSON.stringify(link_data), 'utf8').toString('base64'));
-        let activation_link = process.env.FRONT_SITE_URL + 'email/' + encoded_data;
+    if (!template) return { success: false, code: -3 }; // Template not found
+    if (!template.is_enabled) return { success: false, code: -4 }; // Template disabled
 
-        const row1 = await AdmLinkAct.create({
-            unique_id: uuid,
-            admin_id: admin_id,
-            sent_date: db.get_ist_current_date()
+    const subject = replaceEmailTags(template.subject, userData, extraTags);
+    const body = replaceEmailTags(template.body_text, userData, extraTags);
+
+    try {
+        await emailTransporter.sendMail({
+            from: process.env.EMAIL_CONFIG_SENDER,
+            to: userData.email_id,
+            subject,
+            html: body
         });
-
-        const activation_id = (row1 ? row1.activation_id : 0);
-        if (activation_id > 0) {
-            const rowT = await EmailTemplate.findOne({
-                where: {
-                    template_id: EmailTemplates.ADMIN_USER_ACTIVATION_LINK.value
-                },
-                attributes: [
-                    'subject',
-                    'body_text',
-                    'is_enabled'
-                ]
-            });
-
-            if (rowT) {
-                if (rowT.is_enabled) {
-                    let subject = rowT.subject ? rowT.subject : "";
-                    let body_text = rowT.body_text ? rowT.body_text : "";
-
-                    subject = subject.replaceAll(process.env.EMAIL_TAG_FIRST_NAME, row4.first_name);
-                    subject = subject.replaceAll(process.env.EMAIL_TAG_LAST_NAME, row4.last_name);
-                    subject = subject.replaceAll(process.env.EMAIL_TAG_EMAIL_ID, row4.email_id);
-                    subject = subject.replaceAll(process.env.EMAIL_TAG_MOBILE_NO, row4.mobile_no);
-                    subject = subject.replaceAll(process.env.SITE_URL_TAG, process.env.FRONT_SITE_URL);
-
-                    body_text = body_text.replaceAll(process.env.EMAIL_TAG_FIRST_NAME, row4.first_name);
-                    body_text = body_text.replaceAll(process.env.EMAIL_TAG_LAST_NAME, row4.last_name);
-                    body_text = body_text.replaceAll(process.env.EMAIL_TAG_EMAIL_ID, row4.email_id);
-                    body_text = body_text.replaceAll(process.env.EMAIL_TAG_MOBILE_NO, row4.mobile_no);
-                    body_text = body_text.replaceAll(process.env.EMAIL_TAG_ACTIVATION_LINK, activation_link);
-                    body_text = body_text.replaceAll(process.env.SITE_URL_TAG, process.env.FRONT_SITE_URL);
-
-                    let mailOptions = {
-                        from: process.env.EMAIL_CONFIG_SENDER,
-                        to: row4.email_id,
-                        subject: subject,
-                        html: body_text,
-                    };
-                    let is_success = false;
-                    try {
-                        await emailTransporter.sendMail(mailOptions);
-                        is_success = true;
-                    } catch (err) {
-                        _logger.error(err.stack);
-                    }
-                    if (is_success) {
-                        return 1;
-                    } else {
-                        return 0; /* Sending fail*/
-                    }
-                } else {
-                    return -4;      /*Templete is disabled*/
-                }
-            } else {
-                return -3;      /*Templete not found*/
-            }
-        }
-        else {
-            return -2;     /*Unable to add invite link uuid*/
-        }
+        return { success: true, code: 1 };
+    } catch (err) {
+        _logger.error(err.stack);
+        return { success: false, code: 0 }; // Send failed
     }
-    return 0;       /*admin data not found*/
+};
+
+
+
+
+const send_invite_link = async (admin_id) => {
+    const { AdmUser, AdmLinkAct } = getModels();
+
+    const user = await AdmUser.findOne({
+        where: { admin_id, is_deleted: false },
+        attributes: ['first_name', 'last_name', 'email_id', 'mobile_no', 'is_activated']
+    });
+
+    if (!user) return 0; // Admin data not found
+    if (user.is_activated) return -1; // Already activated
+
+    const uuid = randomUUID();
+    const link_data = { page: 'admin_invite', token: uuid.toString() };
+    const encoded_data = encodeURIComponent(Buffer.from(JSON.stringify(link_data), 'utf8').toString('base64'));
+    const activation_link = process.env.FRONT_SITE_URL + 'email/' + encoded_data;
+
+    const linkRecord = await AdmLinkAct.create({
+        unique_id: uuid,
+        admin_id: admin_id,
+        sent_date: db.get_ist_current_date()
+    });
+
+    if (!linkRecord?.activation_id) return -2; // Unable to add invite link uuid
+
+    const result = await sendEmailWithTemplate(
+        EmailTemplates.ADMIN_USER_ACTIVATION_LINK.value,
+        user,
+        { [process.env.EMAIL_TAG_ACTIVATION_LINK]: activation_link }
+    );
+
+    return result.code;
 };
 
 const send_reset_link = async (admin_id) => {
-    const { AdmUser, AdmLinkReset, EmailTemplate } = getModels();
+    const { AdmUser, AdmLinkReset } = getModels();
 
-    const row4 = await AdmUser.findOne({
-        where: {
-            admin_id,
-            is_deleted: false
-        },
-        attributes: [
-            'first_name',
-            'last_name',
-            'email_id',
-            'mobile_no',
-            'login_name',
-            'is_enabled',
-            'added_date',
-            'modify_date',
-            'role_id',
-            'is_activated'
-        ]
+    const user = await AdmUser.findOne({
+        where: { admin_id, is_deleted: false },
+        attributes: ['first_name', 'last_name', 'email_id', 'mobile_no', 'is_activated']
     });
 
-    if (!row4) {
-        return 0;       /*admin data not found*/
-    }
+    if (!user) return 0; // Admin data not found
+    if (!user.is_activated) return -1; // Account not activated
 
-    if (!row4.is_activated) {
-        return -1;      /*account not activated*/
-    }
+    const uuid = randomUUID();
+    const link_data = { page: 'admin_reset', token: uuid.toString() };
+    const encoded_data = encodeURIComponent(Buffer.from(JSON.stringify(link_data), 'utf8').toString('base64'));
+    const reset_link = process.env.FRONT_SITE_URL + 'email/' + encoded_data;
 
-    if (row4) {
-        if (row4.is_activated && row4.is_activated == true) {
-            const uuid = randomUUID();
-            const link_data = { page: 'admin_reset', token: uuid.toString(), };
-            const encoded_data = encodeURIComponent(Buffer.from(JSON.stringify(link_data), 'utf8').toString('base64'));
-            let activation_link = process.env.FRONT_SITE_URL + 'email/' + encoded_data;
+    const linkRecord = await AdmLinkReset.create({
+        unique_id: uuid,
+        admin_id: admin_id,
+        sent_date: db.get_ist_current_date()
+    });
 
-            const row1 = await AdmLinkReset.create({
-                unique_id: uuid,
-                admin_id: admin_id,
-                sent_date: db.get_ist_current_date()
-            });
+    if (!linkRecord?.reset_id) return -2; // Unable to add reset link uuid
 
-            const reset_id = (row1 ? row1.reset_id : 0);
-            if (reset_id > 0) {
-                const rowT = await EmailTemplate.findOne({
-                    where: {
-                        template_id: EmailTemplates.ADMIN_USER_RESET_PASS_LINK.value
-                    },
-                    attributes: [
-                        'subject',
-                        'body_text',
-                        'is_enabled'
-                    ]
-                });
+    const result = await sendEmailWithTemplate(
+        EmailTemplates.ADMIN_USER_RESET_PASS_LINK.value,
+        user,
+        { [process.env.EMAIL_TAG_RESET_PASS_LINK]: reset_link }
+    );
 
-                if (rowT) {
-                    if (rowT.is_enabled) {
-                        let subject = rowT.subject ? rowT.subject : "";
-                        let body_text = rowT.body_text ? rowT.body_text : "";
-
-                        subject = subject.replaceAll(process.env.EMAIL_TAG_FIRST_NAME, row4.first_name);
-                        subject = subject.replaceAll(process.env.EMAIL_TAG_LAST_NAME, row4.last_name);
-                        subject = subject.replaceAll(process.env.EMAIL_TAG_EMAIL_ID, row4.email_id);
-                        subject = subject.replaceAll(process.env.EMAIL_TAG_MOBILE_NO, row4.mobile_no);
-                        subject = subject.replaceAll(process.env.SITE_URL_TAG, process.env.FRONT_SITE_URL);
-
-                        body_text = body_text.replaceAll(process.env.EMAIL_TAG_FIRST_NAME, row4.first_name);
-                        body_text = body_text.replaceAll(process.env.EMAIL_TAG_LAST_NAME, row4.last_name);
-                        body_text = body_text.replaceAll(process.env.EMAIL_TAG_EMAIL_ID, row4.email_id);
-                        body_text = body_text.replaceAll(process.env.EMAIL_TAG_MOBILE_NO, row4.mobile_no);
-                        body_text = body_text.replaceAll(process.env.EMAIL_TAG_RESET_PASS_LINK, activation_link);
-                        body_text = body_text.replaceAll(process.env.SITE_URL_TAG, process.env.FRONT_SITE_URL);
-
-                        let mailOptions = {
-                            from: process.env.EMAIL_CONFIG_SENDER,
-                            to: row4.email_id,
-                            subject: subject,
-                            html: body_text,
-                        };
-                        let is_success = false;
-                        try {
-                            await emailTransporter.sendMail(mailOptions);
-                            is_success = true;
-                        } catch (err) {
-                            _logger.error(err.stack);
-                        }
-                        if (is_success) {
-                            return 1;
-                        } else {
-                            return 0; /* Sending fail*/
-                        }
-                    } else {
-                        return -4;      /*Templete is disabled*/
-                    }
-                } else {
-                    return -3;      /*Templete not found*/
-                }
-            }
-            else {
-                return -2;     /*Unable to add reset link uuid*/
-            }
-        } else {
-            return -1;      /*account not activated*/
-        }
-    }
-    return 0;       /*admin data not found*/
+    return result.code;
 };
 
 const admin_user_list = async (req, res, next) => {
-    const { page_no, role_id, search_text } = req.body;
+    const { page_no, search_text } = req.body;
     try {
         const { AdmUser, AdmRole } = getModels();
+        const _page_no = Math.max(1, parseNumericWithDefault(page_no, 1));
+        const _search_text = search_text?.length > 0 ? search_text : "";
+        const formatDate = (date) => date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(date)) : "";
 
-        let _page_no = page_no && validator.isNumeric(page_no.toString()) ? parseInt(page_no) : 0; if (_page_no <= 0) { _page_no = 1; }
-        let _search_text = search_text && search_text.length > 0 ? search_text : "";
-        let _role_id = role_id && validator.isNumeric(role_id.toString()) ? parseInt(role_id) : 0;
-
-        // Build search condition
         const searchCondition = _search_text.length > 0 ? {
             [Op.or]: [
                 { first_name: { [Op.iLike]: `${_search_text}%` } },
@@ -242,65 +163,41 @@ const admin_user_list = async (req, res, next) => {
             ]
         } : {};
 
-        // Count total records - Using ORM
-        const total_record = await AdmUser.count({
-            where: {
-                is_deleted: false,
-                ...searchCondition
-            }
-        });
-
-        // Get paginated list with role - Using ORM
+        const whereClause = { is_deleted: false, ...searchCondition };
+        const total_record = await AdmUser.count({ where: whereClause });
         const offset = (_page_no - 1) * parseInt(process.env.PAGINATION_SIZE);
-        const row1 = await AdmUser.findAll({
-            where: {
-                is_deleted: false,
-                ...searchCondition
-            },
-            attributes: [
-                'admin_id', 'first_name', 'last_name', 'email_id', 'mobile_no',
-                'login_name', 'login_pass', 'is_master', 'is_enabled', 'is_deleted',
-                'added_by', 'modify_by', 'added_date', 'modify_date', 'role_id',
-                'is_activated', 'activate_date'
-            ],
-            include: [{
-                model: AdmRole,
-                as: 'role',
-                attributes: ['role_name'],
-                required: true
-            }],
+
+        const users = await AdmUser.findAll({
+            where: whereClause,
+            attributes: ['admin_id', 'first_name', 'last_name', 'email_id', 'mobile_no',
+                'login_name', 'is_master', 'is_enabled', 'added_date', 'modify_date', 'is_activated', 'activate_date'],
+            include: [{ model: AdmRole, as: 'role', attributes: ['role_name'], required: true }],
             order: [['admin_id', 'DESC']],
             limit: parseInt(process.env.PAGINATION_SIZE),
-            offset: offset
+            offset
         });
 
-        let list = [];
-        if (row1) {
-            let sr_no = offset;
-            for (const item of row1) {
-                sr_no++;
-                list.push({
-                    sr_no: sr_no,
-                    admin_id: item.admin_id,
-                    first_name: item.first_name,
-                    last_name: item.last_name,
-                    email_id: item.email_id,
-                    mobile_no: item.mobile_no,
-                    login_name: item.login_name,
-                    role_name: item.role ? item.role.role_name : '',
-                    enabled: item.is_enabled,
-                    is_master: item.is_master,
-                    is_activated: item.is_activated,
-                    added_on: item.added_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(item.added_date)) : "",
-                    modify_on: item.modify_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(item.modify_date)) : "",
-                    activate_date: item.activate_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(item.activate_date)) : "",
-                });
-            }
-        }
+        const list = (users || []).map((item, index) => ({
+            sr_no: offset + index + 1,
+            admin_id: item.admin_id,
+            first_name: item.first_name,
+            last_name: item.last_name,
+            email_id: item.email_id,
+            mobile_no: item.mobile_no,
+            login_name: item.login_name,
+            role_name: item.role?.role_name || '',
+            enabled: item.is_enabled,
+            is_master: item.is_master,
+            is_activated: item.is_activated,
+            added_on: formatDate(item.added_date),
+            modify_on: formatDate(item.modify_date),
+            activate_date: formatDate(item.activate_date)
+        }));
+
         const results = {
             current_page: _page_no,
             total_pages: Math.ceil(total_record / process.env.PAGINATION_SIZE),
-            data: list,
+            data: list
         };
         return res.status(200).json(success(true, res.statusCode, "", results));
     } catch (err) {
@@ -366,99 +263,42 @@ const admin_user_set = async (req, res, next) => {
     const { AdmUser } = getModels();
     const { first_name, last_name, email_id, mobile_no, role_id } = req.body;
     try {
-        let _admin_id = 1;
-        let _role_id = role_id && validator.isNumeric(role_id.toString()) ? parseInt(role_id) : 0;
-        if (!first_name || first_name.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter first name.", null));
-        }
-        if (first_name.length > 30) {
-            return res.status(200).json(success(false, res.statusCode, "First name should not be more than 30 character", null));
-        }
-        if (!last_name || last_name.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter last name.", null));
-        }
-        if (last_name.length > 30) {
-            return res.status(200).json(success(false, res.statusCode, "Last name should not be more than 30 character", null));
-        }
-        if (!email_id || email_id.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter email id.", null));
-        }
-        if (email_id && email_id.length > 0 && !validator.isEmail(email_id)) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter correct email address.", null));
-        }
-        if (!mobile_no || mobile_no.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter mobile no.", null));
-        }
-        if ((mobile_no && mobile_no.length > 0 && !validator.isNumeric(mobile_no)) || mobile_no.length != 10) {
-            return res.status(200).json(success(false, res.statusCode, "Invalid mobile number.", null));
-        }
-        let _login_name = email_id;
+        const _role_id = parseNumericWithDefault(role_id);
 
-        // Check email exists - Using ORM
-        const row1 = await AdmUser.findOne({
-            where: {
-                email_id,
-                is_deleted: false
-            },
-            attributes: ['admin_id']
-        });
-        let emailExists = row1 ? true : false;
-        if (emailExists) {
-            return res.status(200).json(success(false, res.statusCode, "Email address is already registered.", null));
-        }
+        // Validation checks
+        if (!first_name?.length) return res.status(200).json(success(false, res.statusCode, "Please enter first name.", null));
+        if (first_name.length > 30) return res.status(200).json(success(false, res.statusCode, "First name should not be more than 30 character", null));
+        if (!last_name?.length) return res.status(200).json(success(false, res.statusCode, "Please enter last name.", null));
+        if (last_name.length > 30) return res.status(200).json(success(false, res.statusCode, "Last name should not be more than 30 character", null));
+        if (!email_id?.length) return res.status(200).json(success(false, res.statusCode, "Please enter email id.", null));
+        if (!validator.isEmail(email_id)) return res.status(200).json(success(false, res.statusCode, "Please enter correct email address.", null));
+        if (!mobile_no?.length) return res.status(200).json(success(false, res.statusCode, "Please enter mobile no.", null));
+        if (!validator.isNumeric(mobile_no) || mobile_no.length !== 10) return res.status(200).json(success(false, res.statusCode, "Invalid mobile number.", null));
 
-        // Check mobile exists - Using ORM
-        const row3 = await AdmUser.findOne({
-            where: {
-                mobile_no,
-                is_deleted: false
-            },
-            attributes: ['admin_id']
-        });
-        let mobileExists = row3 ? true : false;
-        if (mobileExists) {
-            return res.status(200).json(success(false, res.statusCode, "Mobile number is already registered.", null));
-        }
+        // Check duplicates
+        const emailExists = await AdmUser.findOne({ where: { email_id, is_deleted: false }, attributes: ['admin_id'] });
+        if (emailExists) return res.status(200).json(success(false, res.statusCode, "Email address is already registered.", null));
 
-        // Create new admin user - Using ORM
-        const rowOut = await AdmUser.create({
-            first_name: first_name,
-            last_name: last_name,
-            email_id: email_id,
-            mobile_no: mobile_no,
-            login_name: _login_name,
-            login_pass: '',
-            is_master: false,
-            is_enabled: true,
-            is_deleted: false,
-            added_by: _admin_id,
-            added_date: db.get_ist_current_date(),
-            role_id: _role_id,
-            is_activated: false,
+        const mobileExists = await AdmUser.findOne({ where: { mobile_no, is_deleted: false }, attributes: ['admin_id'] });
+        if (mobileExists) return res.status(200).json(success(false, res.statusCode, "Mobile number is already registered.", null));
+
+        // Create new admin user
+        const newUser = await AdmUser.create({
+            first_name, last_name, email_id, mobile_no,
+            login_name: email_id, login_pass: '',
+            is_master: false, is_enabled: true, is_deleted: false,
+            added_by: 1, added_date: db.get_ist_current_date(),
+            role_id: _role_id, is_activated: false,
             modify_by: req.token_data.account_id
         });
 
-        const admin_id = (rowOut ? rowOut.admin_id : 0);
-        if (admin_id > 0) {
-            await send_invite_link(admin_id);
-            try {
-                let data_to_log = {
-                    correlation_id: correlator.getId(),
-                    token_id: req.token_data.token_id,
-                    account_id: req.token_data.account_id,
-                    user_type: 1,
-                    user_id: req.token_data.admin_id,
-                    narration: 'New admin user added and sent invite link. User email = ' + email_id,
-                    query: 'ORM create AdmUser',
-                    date_time: db.get_ist_current_date(),
-                };
-                action_logger.info(JSON.stringify(data_to_log));
-            } catch (_) { }
-
-            return res.status(200).json(success(true, res.statusCode, "Saved successfully.", null));
-        } else {
+        if (!newUser?.admin_id) {
             return res.status(200).json(success(false, res.statusCode, "Unable to save, Please try again", null));
         }
+
+        await send_invite_link(newUser.admin_id);
+        logAction(req, 'New admin user added and sent invite link. User email = ' + email_id, 'ORM create AdmUser');
+        return res.status(200).json(success(true, res.statusCode, "Saved successfully.", null));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
@@ -509,7 +349,7 @@ const admin_user_toggle = async (req, res, next) => {
                     account_id: req.token_data.account_id,
                     user_type: 1,
                     user_id: req.token_data.admin_id,
-                    narration: 'Admin user ' + (row1.is_enabled == true ? 'disabled' : 'enabled') + ' User email id ' + row1.email_id,
+                    narration: 'Admin user ' + (row1.is_enabled ? 'disabled' : 'enabled') + ' User email id ' + row1.email_id,
                     query: 'ORM update AdmUser',
                     date_time: db.get_ist_current_date(),
                 };
@@ -635,10 +475,9 @@ const all_users_excel = async (req, res, next) => {
     const { search_text } = req.body;
     try {
         const { AdmUser, AdmRole } = getModels();
+        const _search_text = search_text?.length > 0 ? search_text : "";
+        const formatDate = (date) => date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(date)) : "";
 
-        let _search_text = search_text && search_text.length > 0 ? search_text : "";
-
-        // Build search condition
         const searchCondition = _search_text.length > 0 ? {
             [Op.or]: [
                 { first_name: { [Op.iLike]: `${_search_text}%` } },
@@ -648,72 +487,40 @@ const all_users_excel = async (req, res, next) => {
             ]
         } : {};
 
-        // Get all users with role - Using ORM
-        const row1 = await AdmUser.findAll({
-            where: {
-                is_deleted: false,
-                ...searchCondition
-            },
-            attributes: [
-                'first_name', 'last_name', 'email_id', 'mobile_no', 'is_enabled',
-                'is_activated', 'added_date', 'modify_date', 'role_id', 'activate_date'
-            ],
-            include: [{
-                model: AdmRole,
-                as: 'role',
-                where: { is_deleted: false },
-                attributes: ['role_name'],
-                required: true
-            }],
+        const users = await AdmUser.findAll({
+            where: { is_deleted: false, ...searchCondition },
+            attributes: ['first_name', 'last_name', 'email_id', 'mobile_no', 'is_enabled', 'is_activated', 'added_date', 'activate_date'],
+            include: [{ model: AdmRole, as: 'role', where: { is_deleted: false }, attributes: ['role_name'], required: true }],
             order: [['admin_id', 'DESC']]
         });
 
-        let list = [];
-        if (row1) {
-            let sr_no = 0;
-            for (const item of row1) {
-                sr_no++;
-                list.push({
-                    sr_no: sr_no,
-                    first_name: item.first_name,
-                    last_name: item.last_name,
-                    email_id: item.email_id,
-                    mobile_no: item.mobile_no,
-                    role_name: item.role ? item.role.role_name : '',
-                    is_enabled: item.is_enabled ? 'Enable' : 'Disable',
-                    register_date: item.added_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(item.added_date)) : "",
-                    is_activated: item.is_activated ? 'Activated' : 'Not Activated',
-                    activated_date: item.activate_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(item.activate_date)) : "",
-                });
-            }
-        }
+        const list = (users || []).map((item, index) => ({
+            sr_no: index + 1,
+            first_name: item.first_name,
+            last_name: item.last_name,
+            email_id: item.email_id,
+            mobile_no: item.mobile_no,
+            role_name: item.role?.role_name || '',
+            is_enabled: item.is_enabled ? 'Enable' : 'Disable',
+            register_date: formatDate(item.added_date),
+            is_activated: item.is_activated ? 'Activated' : 'Not Activated',
+            activated_date: formatDate(item.activate_date)
+        }));
+
         const workbook = new excel.Workbook();
         const worksheet = workbook.addWorksheet('Sheet 1');
         const headers = ['Sr No', 'First Name', 'Last Name', 'Email', 'Mobile No', 'Role Name', 'Is Enabled', 'Register Date', 'Is Activated', 'Activated Date'];
-        const headerRow = worksheet.addRow(headers);
-        headerRow.eachCell((cell, colNumber) => {
-            cell.font = { bold: true };
-        });
-        worksheet.getColumn(1).width = 7;
-        worksheet.getColumn(2).width = 15;
-        worksheet.getColumn(3).width = 15;
-        worksheet.getColumn(4).width = 25;
-        worksheet.getColumn(5).width = 15;
-        worksheet.getColumn(6).width = 20;
-        worksheet.getColumn(7).width = 10;
-        worksheet.getColumn(8).width = 15;
-        worksheet.getColumn(9).width = 15;
-        worksheet.getColumn(10).width = 15;
+        const columnWidths = [7, 15, 15, 25, 15, 20, 10, 15, 15, 15];
 
-        for (const item of list) {
-            const rowValues = Object.values(item);
-            worksheet.addRow(rowValues);
-        }
+        const headerRow = worksheet.addRow(headers);
+        headerRow.eachCell((cell) => { cell.font = { bold: true }; });
+        columnWidths.forEach((width, i) => { worksheet.getColumn(i + 1).width = width; });
+        list.forEach((item) => worksheet.addRow(Object.values(item)));
+
         const excelBuffer = await workbook.xlsx.writeBuffer();
         res.setHeader('Content-Length', excelBuffer.length);
         res.send(excelBuffer);
-    }
-    catch (err) {
+    } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
     }
