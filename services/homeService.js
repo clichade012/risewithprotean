@@ -3,7 +3,7 @@ import db from '../database/db_helper.js';
 import { QueryTypes, Op, literal } from 'sequelize';
 import { success } from "../model/responseModel.js";
 import validator from 'validator';
-import { API_STATUS, EmailTemplates } from "../model/enumModel.js";
+import { API_STATUS } from "../model/enumModel.js";
 import { rsa_decrypt } from "../services/rsaEncryption.js";
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
@@ -13,6 +13,7 @@ import * as customerService from '../services/customerService.js';
 import * as admCustomerService from '../services/admin/admCustomerService.js';
 import { fetch } from 'cross-fetch';
 import { randomUUID } from 'crypto';
+import { EmailTemplates } from "../model/enumModel.js";
 import emailTransporter from "../services/emailService.js";
 import supportTransporter from "../services/supportService.js";
 import DeviceDetector from 'node-device-detector';
@@ -23,102 +24,6 @@ import * as apigeeService from "../services/apigeeService.js";
 
 // Helper function to get models from db
 const getModels = () => db.models;
-// Helper: Validate captcha token
-const validateCaptcha = async (captcha_token) => {
-    const _captcha_token = captcha_token?.length > 0 ? captcha_token : '';
-    const captchaUrl = `https://www.google.com/recaptcha/api/siteverify?secret=${process.env.CAPTCHA_SECRET}&response=${_captcha_token}`;
-    try {
-        const captchaResp = await fetch(captchaUrl);
-        if (captchaResp.ok) {
-            const captchaData = await captchaResp.json();
-            return captchaData?.success === true;
-        }
-    } catch (error) {
-        console.error('CAPTCHA validation failed:', error.message);
-    }
-    return false;
-};
-
-// Helper: Validate name field
-const validateName = (name, fieldName) => {
-    if (!name || name.length <= 0) return `Please enter ${fieldName}.`;
-    if (name.length > 30) return `${fieldName} should not be more than 30 character`;
-    return null;
-};
-
-// Helper: Validate password requirements
-const validatePassword = (password) => {
-    if (!password || password.length <= 0) return "Please enter password.";
-    if (password.length < 8) return "The password must contain atleast 8 characters.";
-    if (!/\d/.test(password)) return "The password must contain a number.";
-    if (!/[`!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?~]/.test(password)) return "The password must contain a special character.";
-    return null;
-};
-
-// Helper: Validate signup input fields
-const validateSignupInput = async (jsonData) => {
-    const { first_name, last_name, network_id, mobile_no, email_id, industry_id, company_name, password } = jsonData;
-
-    let error = validateName(first_name, 'first name');
-    if (error) return error;
-
-    error = validateName(last_name, 'last name');
-    if (error) return error;
-
-    if (!network_id || !validator.isNumeric(network_id.toString()) || network_id <= 0) {
-        return "Please select country code.";
-    }
-    if (!mobile_no || mobile_no.length <= 0) return "Please enter mobile number.";
-    if ((mobile_no && mobile_no.length > 0 && !validator.isNumeric(mobile_no)) || mobile_no.length != 10) {
-        return "Invalid mobile number.";
-    }
-    if (!email_id || email_id.length <= 0) return "Please enter email address.";
-    if (email_id && email_id.length > 0 && !validator.isEmail(email_id)) return "Invalid email address.";
-
-    const isEmailValid = await apigeeService.emailVerification(email_id);
-    if (!isEmailValid) return "Invalid email address. Please enter a valid one.";
-
-    const isMobileValid = await apigeeService.mobileVerification(mobile_no);
-    if (!isMobileValid) return "Invalid mobile no. Please enter a valid one.";
-
-    if (!industry_id || !validator.isNumeric(industry_id.toString()) || industry_id <= 0) {
-        return "Please select business category.";
-    }
-    if (!company_name || company_name.length <= 0) return "Please enter company name.";
-
-    error = validatePassword(password);
-    if (error) return error;
-
-    return null;
-};
-
-// Helper: Check if customer already exists
-const checkExistingCustomer = async (CstCustomer, email_id, mobile_no) => {
-    const emailExists = await CstCustomer.findOne({
-        attributes: ['customer_id'],
-        where: { email_id: email_id, is_deleted: false }
-    });
-    if (emailExists) return "Email address is already registered.";
-
-    const mobileExists = await CstCustomer.findOne({
-        attributes: ['customer_id'],
-        where: { mobile_no: mobile_no, is_deleted: false }
-    });
-    if (mobileExists) return "Mobile number is already registered.";
-
-    return null;
-};
-
-// Helper: Handle auto-approve for new customer
-const handleAutoApprove = async (Settings, customer_id) => {
-    const settingsRow = await Settings.findOne({ attributes: ['is_auto_approve_customer'] });
-    if (settingsRow?.is_auto_approve_customer === true) {
-        await admCustomerService.customer_approve_auto(customer_id);
-        return true;
-    }
-    return false;
-};
-
 
 const homeold = async (req, res, next) => {
     try {
@@ -398,7 +303,7 @@ const signup_new = async (req, res, next) => {
         if (!hasNumber.test(password)) {
             return res.status(200).json(success(false, res.statusCode, "The password must contain a number.", null));
         }
-        const specialChars = /[`!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?~]/;
+        const specialChars = /[`!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?~]/;
         if (!specialChars.test(password)) {
             return res.status(200).json(success(false, res.statusCode, "The password must contain a special character.", null));
         }
@@ -1023,7 +928,7 @@ const verify_reset_pass = async (req, res, next) => {
         if (!hasNumber.test(password)) {
             return res.status(200).json(success(false, res.statusCode, "The password must contain a number.", null));
         }
-        const specialChars = /[`!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?~]/;
+        const specialChars = /[`!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?~]/;
         if (!specialChars.test(password)) {
             return res.status(200).json(success(false, res.statusCode, "The password must contain a special character.", null));
         }
@@ -1253,6 +1158,7 @@ const terms_condition = async (req, res, next) => {
         return res.status(500).json(success(false, res.statusCode, err.message, null));
     }
 };
+
 
 const product_get = async (req, res, next) => {
     const { page_no, filter_id, search_text, category_id } = req.body;
