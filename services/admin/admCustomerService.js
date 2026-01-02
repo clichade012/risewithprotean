@@ -1585,7 +1585,7 @@ const all_customer_dropdown = async (req, res, next) => {
     try {
         const { CstCustomer, MobileNetwork, Industry } = db.models;
         let _page_no = page_no && validator.isNumeric(page_no.toString()) ? parseInt(page_no) : 0; if (_page_no <= 0) { _page_no = 1; }
-        let _search_text = search_text && search_text.length > 0 ? search_text : "";
+        // let _search_text = search_text && search_text.length > 0 ? search_text : "";
 
         const rows = await CstCustomer.findAll({
             where: {

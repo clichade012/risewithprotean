@@ -13,6 +13,26 @@ import commonModule from "../../modules/commonModule.js";
 // Helper function to get models - must be called after db is initialized
 const getModels = () => db.models;
 
+// Shared helper function to get products for an app
+const getAppProductsForApp = async (app_id, CstAppProduct, Product) => {
+    const appProducts = await CstAppProduct.findAll({
+        where: { app_id },
+        include: [{ model: Product, as: 'product', attributes: ['product_name'], required: true }]
+    });
+    return appProducts.map(ap => ap.product.product_name).join(', ');
+};
+
+// Helper function to format full name from user object
+const formatFullName = (user, firstNameKey = 'first_name', lastNameKey = 'last_name') => {
+    if (!user) return '';
+    return `${user[firstNameKey] || ''} ${user[lastNameKey] || ''}`.trim();
+};
+
+// Helper function to format date
+const formatDateField = (dateValue) => {
+    return dateValue ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(dateValue)) : "";
+};
+
 const app_req_pending = async (req, res, next) => {
     const { page_no, search_text, in_live } = req.body;
     try {
@@ -23,14 +43,8 @@ const app_req_pending = async (req, res, next) => {
         const offset = (_page_no - 1) * process.env.PAGINATION_SIZE;
         const [is_admin, is_checker, is_maker] = await commonModule.getUserRoles(req);
 
-        // Helper function to get products for an app
-        const getAppProducts = async (app_id) => {
-            const appProducts = await CstAppProduct.findAll({
-                where: { app_id },
-                include: [{ model: Product, as: 'product', attributes: ['product_name'], required: true }]
-            });
-            return appProducts.map(ap => ap.product.product_name).join(', ');
-        };
+        // Use shared helper function for products
+        const getAppProducts = (app_id) => getAppProductsForApp(app_id, CstAppProduct, Product);
 
         // Helper function to build list from rows
         const buildList = async (rows, startSrNo) => {
@@ -39,21 +53,19 @@ const app_req_pending = async (req, res, next) => {
             for (const app of rows) {
                 sr_no++;
                 const products = await getAppProducts(app.app_id);
-                const full_name = `${app.customer?.first_name || ''} ${app.customer?.last_name || ''}`.trim();
-                const mkr_name = app.mkrApprovedByUser ? `${app.mkrApprovedByUser.first_name || ''} ${app.mkrApprovedByUser.last_name || ''}`.trim() : '';
                 list.push({
                     sr_no,
                     app_id: app.app_id,
-                    full_name,
+                    full_name: formatFullName(app.customer),
                     email_id: app.customer?.email_id || '',
                     mobile_no: app.customer?.mobile_no || '',
                     app_name: app.app_name,
                     products,
                     expected_volume: app.expected_volume,
-                    register_date: app.added_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(app.added_date)) : "",
+                    register_date: formatDateField(app.added_date),
                     mkr_approved: app.mkr_is_approved,
-                    mkr_full_name: mkr_name,
-                    mkr_approve_date: app.mkr_approved_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(app.mkr_approved_date)) : "",
+                    mkr_full_name: formatFullName(app.mkrApprovedByUser),
+                    mkr_approve_date: formatDateField(app.mkr_approved_date),
                     mkr_remark: app.mkr_approved_rmk,
                 });
             }
@@ -150,47 +162,42 @@ const app_req_approved = async (req, res, next) => {
         const offset = (_page_no - 1) * process.env.PAGINATION_SIZE;
 
         const [is_admin, is_checker, is_maker] = await commonModule.getUserRoles(req);
-        console.log(is_admin, is_checker, is_maker);
 
-        // Helper function to get products for an app
-        const getAppProducts = async (app_id) => {
-            const appProducts = await CstAppProduct.findAll({
-                where: { app_id },
-                include: [{ model: Product, as: 'product', attributes: ['product_name'], required: true }]
-            });
-            return appProducts.map(ap => ap.product.product_name).join(', ');
+        // Use shared helper function for products
+        const getAppProducts = (app_id) => getAppProductsForApp(app_id, CstAppProduct, Product);
+
+        // Helper function to build a single list item (reduces cognitive complexity)
+        const buildListItem = async (app, sr_no) => {
+            const products = await getAppProducts(app.app_id);
+            return {
+                sr_no,
+                app_id: app.app_id,
+                full_name: formatFullName(app.customer),
+                email_id: app.customer?.email_id || '',
+                mobile_no: app.customer?.mobile_no || '',
+                app_name: app.app_name,
+                products,
+                apigee_status: app.apigee_status,
+                is_monetization_enabled: app.is_monetization_enabled,
+                is_monetization_rate_appliacable: app.is_monetization_rate_appliacable,
+                mkr_approved: app.mkr_is_approved,
+                mkr_name: formatFullName(app.mkrApprovedByUser),
+                mkr_remark: app.mkr_approved_rmk,
+                mkr_date: formatDateField(app.mkr_approved_date),
+                chkr_approved: app.is_approved,
+                chkr_name: formatFullName(app.approvedByUser),
+                chkr_remark: app.approve_remark,
+                chkr_date: formatDateField(app.approve_date),
+            };
         };
 
         // Helper function to build list from rows
         const buildList = async (rows, startSrNo) => {
-            let list = [];
+            const list = [];
             let sr_no = startSrNo;
             for (const app of rows) {
                 sr_no++;
-                const products = await getAppProducts(app.app_id);
-                const full_name = `${app.customer?.first_name || ''} ${app.customer?.last_name || ''}`.trim();
-                const mkr_name = app.mkrApprovedByUser ? `${app.mkrApprovedByUser.first_name || ''} ${app.mkrApprovedByUser.last_name || ''}`.trim() : '';
-                const chkr_name = app.approvedByUser ? `${app.approvedByUser.first_name || ''} ${app.approvedByUser.last_name || ''}`.trim() : '';
-                list.push({
-                    sr_no,
-                    app_id: app.app_id,
-                    full_name,
-                    email_id: app.customer?.email_id || '',
-                    mobile_no: app.customer?.mobile_no || '',
-                    app_name: app.app_name,
-                    products,
-                    apigee_status: app.apigee_status,
-                    is_monetization_enabled: app.is_monetization_enabled,
-                    is_monetization_rate_appliacable: app.is_monetization_rate_appliacable,
-                    mkr_approved: app.mkr_is_approved,
-                    mkr_name,
-                    mkr_remark: app.mkr_approved_rmk,
-                    mkr_date: app.mkr_approved_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(app.mkr_approved_date)) : "",
-                    chkr_approved: app.is_approved,
-                    chkr_name,
-                    chkr_remark: app.approve_remark,
-                    chkr_date: app.approve_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(app.approve_date)) : "",
-                });
+                list.push(await buildListItem(app, sr_no));
             }
             return list;
         };
@@ -264,41 +271,32 @@ const app_req_rejected = async (req, res, next) => {
 
         const [is_admin, is_checker, is_maker] = await commonModule.getUserRoles(req);
 
-        // Helper function to get products for an app
-        const getAppProducts = async (app_id) => {
-            const appProducts = await CstAppProduct.findAll({
-                where: { app_id },
-                include: [{ model: Product, as: 'product', attributes: ['product_name'], required: true }]
-            });
-            return appProducts.map(ap => ap.product.product_name).join(', ');
-        };
+        // Use shared helper function for products
+        const getAppProducts = (app_id) => getAppProductsForApp(app_id, CstAppProduct, Product);
 
         // Helper function to build list from rows
         const buildList = async (rows, startSrNo) => {
-            let list = [];
+            const list = [];
             let sr_no = startSrNo;
             for (const app of rows) {
                 sr_no++;
                 const products = await getAppProducts(app.app_id);
-                const full_name = `${app.customer?.first_name || ''} ${app.customer?.last_name || ''}`.trim();
-                const mkr_name = app.mkrRejectedByUser ? `${app.mkrRejectedByUser.first_name || ''} ${app.mkrRejectedByUser.last_name || ''}`.trim() : '';
-                const chkr_name = app.rejectedByUser ? `${app.rejectedByUser.first_name || ''} ${app.rejectedByUser.last_name || ''}`.trim() : '';
                 list.push({
                     sr_no,
                     app_id: app.app_id,
-                    full_name,
+                    full_name: formatFullName(app.customer),
                     email_id: app.customer?.email_id || '',
                     mobile_no: app.customer?.mobile_no || '',
                     app_name: app.app_name,
                     products,
                     mkr_rejected: app.mkr_is_rejected,
-                    mkr_date: app.mkr_rejected_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(app.mkr_rejected_date)) : "",
+                    mkr_date: formatDateField(app.mkr_rejected_date),
                     mkr_remark: app.mkr_rejected_rmk,
-                    mkr_name,
+                    mkr_name: formatFullName(app.mkrRejectedByUser),
                     chkr_rejected: app.is_rejected,
-                    chkr_date: app.rejected_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(app.rejected_date)) : "",
+                    chkr_date: formatDateField(app.rejected_date),
                     chkr_remark: app.reject_remark,
-                    chkr_name,
+                    chkr_name: formatFullName(app.rejectedByUser),
                 });
             }
             return list;
@@ -349,461 +347,482 @@ const app_req_rejected = async (req, res, next) => {
     }
 };
 
+// Helper function to build app detail result object (reduces cognitive complexity)
+const buildAppDetailResult = (appData, products, certificateFile, roles) => {
+    const { is_admin, is_checker, is_maker } = roles;
+    const customer = appData.customer || {};
+
+    return {
+        app_id: appData.app_id,
+        first_name: customer.first_name || '',
+        last_name: customer.last_name || '',
+        email_id: customer.email_id || '',
+        mobile_no: customer.mobile_no || '',
+        app_name: appData.app_name,
+        description: appData.description,
+        expected_volume: appData.expected_volume,
+        callback_url: appData.callback_url,
+        ip_addresses: appData.ip_addresses,
+        certificate_file: certificateFile,
+        products: products,
+        in_live_env: appData.in_live_env,
+        added_date: formatDateField(appData.added_date),
+        apigee_status: appData.apigee_status,
+        is_approved: appData.is_approved,
+        approve_date: formatDateField(appData.approve_date),
+        approve_remark: appData.approve_remark,
+        chkr_approve_by: formatFullName(appData.approvedByUser),
+        is_rejected: appData.is_rejected,
+        rejected_date: formatDateField(appData.rejected_date),
+        reject_remark: appData.reject_remark,
+        chkr_reject_by: formatFullName(appData.rejectedByUser),
+        api_key: appData.api_key,
+        api_secret: appData.api_secret,
+        key_issued_date: formatDateField(appData.key_issued_date),
+        key_expiry_date: formatDateField(appData.key_expiry_date),
+        mkr_is_approved: appData.mkr_is_approved,
+        mkr_approved_date: formatDateField(appData.mkr_approved_date),
+        mkr_approved_rmk: appData.mkr_approved_rmk,
+        mkr_approve_by: formatFullName(appData.mkrApprovedByUser),
+        mkr_is_rejected: appData.mkr_is_rejected,
+        mkr_rejected_date: formatDateField(appData.mkr_rejected_date),
+        mkr_rejected_rmk: appData.mkr_rejected_rmk,
+        mkr_reject_by: formatFullName(appData.mkrRejectedByUser),
+        is_admin,
+        is_maker,
+        is_checker,
+    };
+};
+
+// Helper function to get certificate file URL
+const getCertificateFileUrl = (req, certificateFile) => {
+    return certificateFile && certificateFile.length > 0
+        ? db.get_uploads_url(req) + certificateFile
+        : '';
+};
+
 const app_req_view_detail = async (req, res, next) => {
     const { app_id } = req.body;
     try {
         const { CstAppMast, CstCustomer, CstAppProduct, Product, AdmUser } = getModels();
-        let _app_id = app_id && validator.isNumeric(app_id.toString()) ? parseInt(app_id) : 0;
+        const _app_id = app_id && validator.isNumeric(app_id.toString()) ? parseInt(app_id) : 0;
 
         const [is_admin, is_checker, is_maker] = await commonModule.getUserRoles(req);
 
-        if (is_admin || is_checker || is_maker) {
-            const appData = await CstAppMast.findOne({
-                where: { app_id: _app_id, is_deleted: false },
-                include: [
-                    { model: CstCustomer, as: 'customer', attributes: ['company_name', 'first_name', 'last_name', 'email_id', 'mobile_no'] },
-                    { model: AdmUser, as: 'mkrApprovedByUser', attributes: ['first_name', 'last_name'], required: false },
-                    { model: AdmUser, as: 'mkrRejectedByUser', attributes: ['first_name', 'last_name'], required: false },
-                    { model: AdmUser, as: 'approvedByUser', attributes: ['first_name', 'last_name'], required: false },
-                    { model: AdmUser, as: 'rejectedByUser', attributes: ['first_name', 'last_name'], required: false }
-                ]
-            });
-
-            if (!appData) {
-                return res.status(200).json(success(false, res.statusCode, "App details not found.", null));
-            }
-
-            // Get products
-            const appProducts = await CstAppProduct.findAll({
-                where: { app_id: _app_id },
-                include: [{ model: Product, as: 'product', attributes: ['product_name'], required: true }]
-            });
-            const products = appProducts.map(ap => ap.product.product_name).join(', ');
-
-            let _certificate_file = appData.certificate_file && appData.certificate_file.length > 0 ? db.get_uploads_url(req) + appData.certificate_file : '';
-
-            const mkr_approve_by = appData.mkrApprovedByUser ? `${appData.mkrApprovedByUser.first_name || ''} ${appData.mkrApprovedByUser.last_name || ''}`.trim() : '';
-            const mkr_reject_by = appData.mkrRejectedByUser ? `${appData.mkrRejectedByUser.first_name || ''} ${appData.mkrRejectedByUser.last_name || ''}`.trim() : '';
-            const chkr_approve_by = appData.approvedByUser ? `${appData.approvedByUser.first_name || ''} ${appData.approvedByUser.last_name || ''}`.trim() : '';
-            const chkr_reject_by = appData.rejectedByUser ? `${appData.rejectedByUser.first_name || ''} ${appData.rejectedByUser.last_name || ''}`.trim() : '';
-
-            const results = {
-                app_id: appData.app_id,
-                first_name: appData.customer?.first_name || '',
-                last_name: appData.customer?.last_name || '',
-                email_id: appData.customer?.email_id || '',
-                mobile_no: appData.customer?.mobile_no || '',
-                app_name: appData.app_name,
-                description: appData.description,
-                expected_volume: appData.expected_volume,
-                callback_url: appData.callback_url,
-                ip_addresses: appData.ip_addresses,
-                certificate_file: _certificate_file,
-                products: products,
-                in_live_env: appData.in_live_env,
-                added_date: appData.added_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(appData.added_date)) : "",
-                apigee_status: appData.apigee_status,
-
-                is_approved: appData.is_approved,
-                approve_date: appData.approve_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(appData.approve_date)) : "",
-                approve_remark: appData.approve_remark,
-                chkr_approve_by: chkr_approve_by,
-
-                is_rejected: appData.is_rejected,
-                rejected_date: appData.rejected_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(appData.rejected_date)) : "",
-                reject_remark: appData.reject_remark,
-                chkr_reject_by: chkr_reject_by,
-
-                api_key: appData.api_key,
-                api_secret: appData.api_secret,
-                key_issued_date: appData.key_issued_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(appData.key_issued_date)) : "",
-                key_expiry_date: appData.key_expiry_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(appData.key_expiry_date)) : "",
-
-                mkr_is_approved: appData.mkr_is_approved,
-                mkr_approved_date: appData.mkr_approved_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(appData.mkr_approved_date)) : "",
-                mkr_approved_rmk: appData.mkr_approved_rmk,
-                mkr_approve_by: mkr_approve_by,
-
-                mkr_is_rejected: appData.mkr_is_rejected,
-                mkr_rejected_date: appData.mkr_rejected_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(appData.mkr_rejected_date)) : "",
-                mkr_rejected_rmk: appData.mkr_rejected_rmk,
-                mkr_reject_by: mkr_reject_by,
-
-                is_admin: is_admin,
-                is_maker: is_maker,
-                is_checker: is_checker,
-            };
-            return res.status(200).json(success(true, res.statusCode, "App Details Data.", results));
-        } else {
+        // Early return for unauthorized users
+        if (!is_admin && !is_checker && !is_maker) {
             return res.status(500).json(success(false, API_STATUS.BACK_TO_DASHBOARD.value, "You do not have checker/maker authority.", null));
         }
+
+        const appData = await CstAppMast.findOne({
+            where: { app_id: _app_id, is_deleted: false },
+            include: [
+                { model: CstCustomer, as: 'customer', attributes: ['company_name', 'first_name', 'last_name', 'email_id', 'mobile_no'] },
+                { model: AdmUser, as: 'mkrApprovedByUser', attributes: ['first_name', 'last_name'], required: false },
+                { model: AdmUser, as: 'mkrRejectedByUser', attributes: ['first_name', 'last_name'], required: false },
+                { model: AdmUser, as: 'approvedByUser', attributes: ['first_name', 'last_name'], required: false },
+                { model: AdmUser, as: 'rejectedByUser', attributes: ['first_name', 'last_name'], required: false }
+            ]
+        });
+
+        if (!appData) {
+            return res.status(200).json(success(false, res.statusCode, "App details not found.", null));
+        }
+
+        const products = await getAppProductsForApp(_app_id, CstAppProduct, Product);
+        const certificateFile = getCertificateFileUrl(req, appData.certificate_file);
+        const roles = { is_admin, is_checker, is_maker };
+        const results = buildAppDetailResult(appData, products, certificateFile, roles);
+
+        return res.status(200).json(success(true, res.statusCode, "App Details Data.", results));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
     }
+};
+
+// Helper: Validate app approval status
+const validateAppApprovalStatus = (appData, is_maker) => {
+    if (appData.is_approved) {
+        return { valid: false, message: "App is already approved." };
+    }
+    if (is_maker && appData.mkr_is_approved) {
+        return { valid: false, message: "App is already approved." };
+    }
+    if (appData.is_rejected || appData.mkr_is_rejected) {
+        return { valid: false, message: "App is rejected, can not approve." };
+    }
+    return { valid: true };
+};
+
+// Helper: Process maker approval
+const processMakerApproval = async (CstAppMast, appId, tokenData, remark, appData) => {
+    const [affectedRows] = await CstAppMast.update(
+        {
+            mkr_is_approved: true,
+            mkr_approved_by: tokenData.account_id,
+            mkr_approved_date: db.get_ist_current_date(),
+            mkr_approved_rmk: remark
+        },
+        { where: { app_id: appId } }
+    );
+
+    if (affectedRows > 0) {
+        logApprovalAction(tokenData, appData, 'maker');
+        return { success: true, message: "App approved successfully." };
+    }
+    return { success: false, message: "Unable to approve, Please try again." };
+};
+
+// Helper: Log approval action
+const logApprovalAction = (tokenData, appData, approverType) => {
+    try {
+        const envLabel = appData.in_live_env ? 'Live' : 'Sandbox';
+        const data_to_log = {
+            correlation_id: correlator.getId(),
+            token_id: tokenData.token_id,
+            account_id: tokenData.account_id,
+            user_type: 1,
+            user_id: tokenData.admin_id,
+            narration: `${envLabel} app approved by ${approverType}. Customer email = ${appData.email_id}, App name = ${appData.app_name}`,
+            query: `CstAppMast.update({ approval update })`,
+        };
+        action_logger.info(JSON.stringify(data_to_log));
+    } catch (_) { /* ignore logging errors */ }
+};
+
+// Helper: Create Apigee app
+const createApigeeApp = async (email_id, appData, products, callback_url) => {
+    const data = {
+        developerId: appData.developer_id,
+        name: appData.app_name,
+        callbackUrl: callback_url,
+        status: "approved",
+        apiProducts: products,
+    };
+    const product_URL = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/developers/${email_id}/apps`;
+    const apigeeAuth = await db.get_apigee_token();
+    const response = await fetch(product_URL, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apigeeAuth}`, "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+    });
+    return { responseData: await response.json(), apigeeAuth };
+};
+
+// Helper: Subscribe products
+const subscribeProducts = async (products, email_id) => {
+    try {
+        for (const element of products) {
+            const data = { apiproduct: element };
+            const product_URL = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/developers/${email_id}/subscriptions`;
+            const apigeeAuth = await db.get_apigee_token();
+            await fetch(product_URL, {
+                method: "POST",
+                headers: { Authorization: `Bearer ${apigeeAuth}`, "Content-Type": "application/json" },
+                body: JSON.stringify(data),
+            });
+        }
+    } catch (error) {
+        _logger.error('Product subscription error: ' + error.message);
+    }
+};
+
+// Helper: Build KVM input
+const buildKvmInput = (ip_addresses, cert_public_key) => {
+    const hasValidIp = ip_addresses && ip_addresses.length > 1;
+    const hasPublicKey = cert_public_key && cert_public_key.length > 0;
+    return {
+        authenticationType: hasValidIp ? "apikey_ip" : "apikey",
+        enableEncryption: hasPublicKey,
+        publicKey: hasPublicKey ? cert_public_key : "",
+        validIpList: hasValidIp ? ip_addresses : "",
+        mode: "",
+        isInternal: "false"
+    };
+};
+
+// Helper: Update KVM in Apigee
+const updateApigeeKvm = async (apigee_app_id, kvm_input, in_live_env, apigeeAuth, CstAppMast, appId) => {
+    try {
+        const kvm_2 = { name: apigee_app_id, value: JSON.stringify(kvm_input) };
+        const kvm_environment = in_live_env ? 'prod-01' : 'uat-01';
+        const kvm_url = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/environments/${kvm_environment}/keyvaluemaps/MERCHANT-CONFIG/entries`;
+        const kvm_response = await fetch(kvm_url, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${apigeeAuth}`, "Content-Type": "application/json" },
+            body: JSON.stringify(kvm_2),
+        });
+        const kvm_responseData = await kvm_response.json();
+        await CstAppMast.update({ kvm_json_data: JSON.stringify(kvm_responseData) }, { where: { app_id: appId } });
+    } catch (_) {
+        _logger.error('KVM update error');
+    }
+};
+
+// Helper: Insert customer app data
+const insertCustomerAppData = async (appId, appData, apigee_app_id, approval_response) => {
+    try {
+        const _ad_query = `INSERT INTO customer_app_data(app_id, customer_id, apigee_app_id, app_name, apigee_status, json_data) VALUES (?, ?, ?, ?, ?, ?)`;
+        const _replacementsad = [appId, appData.customer_id, apigee_app_id, appData.app_name, 'approve', approval_response];
+        const [, ad] = await db.sequelize2.query(_ad_query, { replacements: _replacementsad, type: QueryTypes.INSERT });
+
+        if (ad > 0) {
+            await insertProductData(appId);
+        }
+    } catch (__err) {
+        _logger.error(__err.stack);
+    }
+};
+
+// Helper: Insert product data
+const insertProductData = async (appId) => {
+    const _queryad = `SELECT cam.app_id, p.product_name, pr.proxy_id, pr.proxy_name, e.endpoint_id, e.endpoint_url, cm.in_live_env as is_prod,
+        CASE WHEN cm.in_live_env = true THEN 'https://prod.risewithprotean.io/' ELSE 'https://uat.risewithprotean.io/' END as url
+        FROM cst_app_product cam
+        INNER JOIN product p ON cam.product_id = p.product_id
+        INNER JOIN proxies pr ON cam.product_id = pr.product_id
+        INNER JOIN endpoint e ON pr.proxy_id = e.proxy_id
+        LEFT JOIN cst_app_mast cm ON cam.app_id = cm.app_id
+        WHERE cam.app_id = ?`;
+    const ad1 = await db.sequelize.query(_queryad, { replacements: [appId], type: QueryTypes.SELECT });
+
+    if (!ad1) return;
+
+    for (const item of ad1) {
+        const _ad2_query = `INSERT INTO productdata(product_name, proxy_name, endpoint_id, endpoint_url, is_prod, url, app_id, proxy_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`;
+        const _replacementsad2 = [item.product_name, item.proxy_name, item.endpoint_id, item.endpoint_url, item.is_prod, item.url, item.app_id, item.proxy_id];
+        await db.sequelize2.query(_ad2_query, { replacements: _replacementsad2, type: QueryTypes.INSERT });
+    }
+};
+
+// Helper: Process checker/admin approval with Apigee
+const processCheckerAdminApproval = async (CstAppMast, CstAppProduct, Product, appId, tokenData, remark, appData, is_admin) => {
+    const appProducts = await CstAppProduct.findAll({
+        where: { app_id: appId },
+        include: [{ model: Product, as: 'product', attributes: ['product_id', 'product_name'], required: true }]
+    });
+    const products = appProducts.map(ap => ap.product.product_name);
+    const email_id = appData.email_id;
+    const developer_id = appData.developer_id;
+    const callback_url = appData.callback_url || "";
+    const cert_public_key = appData.cert_public_key || "";
+    const ip_addresses = appData.ip_addresses || "";
+
+    if (!developer_id || !email_id) {
+        return { success: false, message: "Apigee response : Developer id not found" };
+    }
+
+    const { responseData, apigeeAuth } = await createApigeeApp(email_id, appData, products, callback_url);
+
+    if (!responseData?.appId) {
+        if (responseData?.error?.message) {
+            return { success: false, message: `Apigee response : ${responseData.error.message}` };
+        }
+        return { success: false, message: "Unable to approve, Please try again." };
+    }
+
+    await subscribeProducts(products, email_id);
+
+    const api_key = responseData.credentials[0].consumerKey;
+    const api_secret = responseData.credentials[0].consumerSecret;
+    const apigee_app_id = responseData.appId;
+    const approval_response = JSON.stringify(responseData);
+
+    const [affectedRows2] = await CstAppMast.update(
+        {
+            apigee_app_id,
+            is_approved: true,
+            approved_by: tokenData.account_id,
+            approve_date: db.get_ist_current_date(),
+            approve_remark: remark,
+            api_key,
+            api_secret,
+            key_issued_date: db.get_ist_current_date(),
+            json_data: approval_response,
+            apigee_status: 'approve'
+        },
+        { where: { app_id: appId } }
+    );
+
+    if (affectedRows2 <= 0) {
+        return { success: false, message: "Unable to approve, Please try again." };
+    }
+
+    const kvm_input = buildKvmInput(ip_addresses, cert_public_key);
+    await updateApigeeKvm(apigee_app_id, kvm_input, appData.in_live_env, apigeeAuth, CstAppMast, appId);
+    logApprovalAction(tokenData, appData, is_admin ? 'admin' : 'checker');
+    await insertCustomerAppData(appId, appData, apigee_app_id, approval_response);
+
+    return { success: true, message: "App approved successfully." };
 };
 
 const app_req_approve = async (req, res, next) => {
     const { app_id, remark } = req.body;
     try {
         const { CstAppMast, CstCustomer, CstAppProduct, Product } = getModels();
-        let _app_id = app_id && validator.isNumeric(app_id.toString()) ? parseInt(app_id) : 0;
+        const _app_id = app_id && validator.isNumeric(app_id.toString()) ? parseInt(app_id) : 0;
+
         if (!remark || remark.length <= 0) {
             return res.status(200).json(success(false, res.statusCode, "Please enter remark.", null));
         }
+
         const [is_admin, is_checker, is_maker] = await commonModule.getUserRoles(req);
 
-        if (is_admin || is_checker || is_maker) {
-            const appData = await CstAppMast.findOne({
-                where: { app_id: _app_id, is_deleted: false },
-                include: [{
-                    model: CstCustomer,
-                    as: 'customer',
-                    where: { is_deleted: false },
-                    attributes: ['customer_id', 'email_id', 'developer_id']
-                }],
-                attributes: ['customer_id', 'app_name', 'description', 'expected_volume', 'callback_url', 'ip_addresses', 'cert_public_key', 'app_id', 'in_live_env', 'is_approved', 'is_rejected', 'mkr_is_approved', 'mkr_is_rejected']
-            });
-
-            if (!appData) {
-                return res.status(200).json(success(false, res.statusCode, "App details not found.", null));
-            }
-            const row1 = [{
-                customer_id: appData.customer_id,
-                app_name: appData.app_name,
-                description: appData.description,
-                expected_volume: appData.expected_volume,
-                callback_url: appData.callback_url,
-                ip_addresses: appData.ip_addresses,
-                cert_public_key: appData.cert_public_key,
-                app_id: appData.app_id,
-                in_live_env: appData.in_live_env,
-                is_approved: appData.is_approved,
-                is_rejected: appData.is_rejected,
-                mkr_is_approved: appData.mkr_is_approved,
-                mkr_is_rejected: appData.mkr_is_rejected,
-                email_id: appData.customer?.email_id,
-                developer_id: appData.customer?.developer_id
-            }];
-
-            if (row1[0]?.is_approved) {
-                return res.status(200).json(success(false, res.statusCode, "App is already approved.", null));
-            }
-            if (is_maker && row1[0]?.mkr_is_approved) {
-                return res.status(200).json(success(false, res.statusCode, "App is already approved.", null));
-            }
-
-            if (row1[0]?.is_rejected) {
-                return res.status(200).json(success(false, res.statusCode, "App is rejected, can not approve.", null));
-            }
-            if (row1[0]?.mkr_is_rejected) {
-                return res.status(200).json(success(false, res.statusCode, "App is rejected, can not approve.", null));
-            }
-            const in_live_env = !!row1[0].in_live_env;
-
-            if (is_maker) {
-                const [affectedRows] = await CstAppMast.update(
-                    {
-                        mkr_is_approved: true,
-                        mkr_approved_by: req.token_data.account_id,
-                        mkr_approved_date: db.get_ist_current_date(),
-                        mkr_approved_rmk: remark
-                    },
-                    { where: { app_id: _app_id } }
-                );
-
-                if (affectedRows > 0) {
-                    try {
-                        let data_to_log = {
-                            correlation_id: correlator.getId(),
-                            token_id: req.token_data.token_id,
-                            account_id: req.token_data.account_id,
-                            user_type: 1,
-                            user_id: req.token_data.admin_id,
-                            narration: (in_live_env ? 'Live' : 'Sandbox') + ' app approved by maker. Customer email = ' + row1[0].email_id + ', App name = ' + row1[0].app_name,
-                            query: `CstAppMast.update({ mkr_is_approved: true }, { where: { app_id: ${_app_id} }})`,
-                        }
-                        action_logger.info(JSON.stringify(data_to_log));
-                    } catch (_) { }
-
-                    return res.status(200).json(success(true, res.statusCode, "App approved successfully.", null));
-                } else {
-                    return res.status(200).json(success(false, res.statusCode, "Unable to approve, Please try again.", null));
-                }
-            } else {
-                const appProducts = await CstAppProduct.findAll({
-                    where: { app_id: _app_id },
-                    include: [{ model: Product, as: 'product', attributes: ['product_id', 'product_name'], required: true }]
-                });
-                const row5 = appProducts.map(ap => ({ product_id: ap.product.product_id, product_name: ap.product.product_name }));
-                const products = row5?.map(item => item.product_name) || [];
-                const developer_id = row1[0].developer_id;
-                const email_id = row1[0].email_id;
-                const callback_url = row1[0].callback_url && row1[0].callback_url.length > 0 ? row1[0].callback_url : "";
-                const cert_public_key = row1[0].cert_public_key && row1[0].cert_public_key.length > 0 ? row1[0].cert_public_key : "";
-                let ip_addresses = row1[0].ip_addresses && row1[0].ip_addresses.length > 0 ? row1[0].ip_addresses : "";
-                // ip_addresses = ''; // IP VALIDATION IS CURRENTLY REMOVED
-
-                if (developer_id && developer_id.length > 0 && email_id.length > 0) {
-                    const data = { developerId: developer_id, name: row1[0].app_name, callbackUrl: callback_url, status: "approved", apiProducts: products, };
-                    const product_URL = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/developers/${email_id}/apps`;
-                    const apigeeAuth = await db.get_apigee_token();
-                    const response = await fetch(product_URL, {
-                        method: "POST",
-                        headers: { Authorization: `Bearer ${apigeeAuth}`, "Content-Type": "application/json", },
-                        body: JSON.stringify(data),
-                    });
-                    const responseData = await response.json();
-                    if (responseData && responseData.appId) {
-                        try {
-                            for (const element of products) {
-                                const data = { apiproduct: element };
-                                console.log("======data======", data);
-                                const product_URL = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/developers/${email_id}/subscriptions`;
-                                const apigeeAuth = await db.get_apigee_token();
-                                const response = await fetch(product_URL, {
-                                    method: "POST",
-                                    headers: { Authorization: `Bearer ${apigeeAuth}`, "Content-Type": "application/json", },
-                                    body: JSON.stringify(data),
-                                });
-                                console.log("========response=========", response);
-                            }
-                        } catch (error) {
-                            console.log("========error=========", error);
-                        }
-                        const api_key = responseData.credentials[0].consumerKey;
-                        const api_secret = responseData.credentials[0].consumerSecret;
-                        const apigee_app_id = responseData.appId;
-                        const approval_response = JSON.stringify(responseData);
-
-                        const [affectedRows2] = await CstAppMast.update(
-                            {
-                                apigee_app_id: apigee_app_id,
-                                is_approved: true,
-                                approved_by: req.token_data.account_id,
-                                approve_date: db.get_ist_current_date(),
-                                approve_remark: remark,
-                                api_key: api_key,
-                                api_secret: api_secret,
-                                key_issued_date: db.get_ist_current_date(),
-                                json_data: approval_response,
-                                apigee_status: 'approve'
-                            },
-                            { where: { app_id: _app_id } }
-                        );
-                        if (affectedRows2 > 0) {
-                            try {
-                                let kvm_input = {};
-                                // if (in_live_env) {
-                                kvm_input = {
-                                    authenticationType: (ip_addresses && ip_addresses.length > 1 ? "apikey_ip" : "apikey"),
-                                    enableEncryption: (cert_public_key && cert_public_key.length > 0 ? true : false),
-                                    publicKey: (cert_public_key && cert_public_key.length > 0 ? cert_public_key : ""),
-                                    validIpList: (ip_addresses && ip_addresses.length > 1 ? ip_addresses : ""),
-                                    mode: "",
-                                    isInternal: "false"
-                                };
-                                // } else {
-                                //     kvm_input = {
-                                //         authenticationType: "apikey",
-                                //         enableEncryption: false,
-                                //         publicKey: "",
-                                //         validIpList: "",
-                                //         mode: "",
-                                //         isInternal: "false"
-                                //     };
-                                // }
-                                let kvm_2 = { "name": apigee_app_id, "value": JSON.stringify(kvm_input), };
-
-                                let kvm_environment = ''; if (in_live_env) { kvm_environment = 'prod-01'; } else { kvm_environment = 'uat-01'; }
-                                const kvm_url = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/environments/${kvm_environment}/keyvaluemaps/MERCHANT-CONFIG/entries`
-                                const kvm_response = await fetch(kvm_url, {
-                                    method: "POST",
-                                    headers: { Authorization: `Bearer ${apigeeAuth}`, "Content-Type": "application/json", },
-                                    body: JSON.stringify(kvm_2),
-                                });
-                                const kvm_responseData = await kvm_response.json();
-
-                                await CstAppMast.update(
-                                    { kvm_json_data: JSON.stringify(kvm_responseData) },
-                                    { where: { app_id: _app_id } }
-                                );
-
-
-                            } catch (_) {
-                                console.log("-------------");
-                            }
-
-                            try {
-                                let data_to_log = {
-                                    correlation_id: correlator.getId(),
-                                    token_id: req.token_data.token_id,
-                                    account_id: req.token_data.account_id,
-                                    user_type: 1,
-                                    user_id: req.token_data.admin_id,
-                                    narration: (in_live_env ? 'Live' : 'Sandbox') + ' app approved by ' + (is_admin ? 'admin' : 'checker') + '. Customer email = ' + row[0].email_id + ', App name = ' + row1[0].app_name,
-                                    query: db.buildQuery_Array(_query2, _replacements2),
-                                }
-                                action_logger.info(JSON.stringify(data_to_log));
-                            } catch (_) { console.log("---catch----------"); }
-
-                            try {
-                                console.log("----------customer_app_data----------");
-                                const _ad_query = `INSERT INTO customer_app_data(app_id, customer_id, apigee_app_id, app_name, apigee_status, json_data) VALUES (?, ?, ?, ?, ?, ?)`;
-                                const _replacementsad = [_app_id, row1[0].customer_id, apigee_app_id, row1[0].app_name, 'approve', approval_response]
-                                const [, ad] = await db.sequelize2.query(_ad_query, { replacements: _replacementsad, type: QueryTypes.INSERT });
-                                if (ad > 0) {
-                                    console.log("----------add----------");
-                                    const _queryad = `SELECT cam.app_id, p.product_name, pr.proxy_id,pr.proxy_name, e.endpoint_id, e.endpoint_url,cm.in_live_env as is_prod,CASE WHEN cm.in_live_env = true THEN 'https://prod.risewithprotean.io/'
-                                    ELSE 'https://uat.risewithprotean.io/' END as url from  cst_app_product cam 
-                                    INNER JOIN product p ON cam.product_id= p.product_id INNER JOIN proxies pr ON cam.product_id= pr.product_id 
-                                    INNER JOIN endpoint e on pr.proxy_id= e.proxy_id LEFT JOIN cst_app_mast cm on cam.app_id=cm.app_id WHERE cam.app_id = ? `;
-                                    const ad1 = await db.sequelize.query(_queryad, { replacements: [_app_id], type: QueryTypes.SELECT });
-                                    if (ad1) {
-                                        for (const item of ad1) {
-                                            console.log("----------for ad1----------");
-                                            const _ad2_query = `INSERT INTO productdata(product_name, proxy_name, endpoint_id, endpoint_url, is_prod, url, app_id, proxy_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`;
-                                            const _replacementsad2 = [item.product_name, item.proxy_name, item.endpoint_id, item.endpoint_url, item.is_prod, item.url, item.app_id, item.proxy_id]
-                                            await db.sequelize2.query(_ad2_query, { replacements: _replacementsad2, type: QueryTypes.INSERT });
-                                        }
-                                    }
-                                }
-                            } catch (__err) {
-                                _logger.error(__err.stack);
-                            }
-
-                            return res.status(200).json(success(true, res.statusCode, "App approved successfully.", null));
-                        } else {
-                            return res.status(200).json(success(false, res.statusCode, "Unable to approve, Please try again.", null));
-                        }
-                    }
-                    else if ((responseData?.error?.status === 'ABORTED' && responseData?.error?.code === 409) || responseData?.error?.message?.length > 0) {
-                        return res.status(200).json(success(false, res.statusCode, `Apigee response : ${responseData?.error?.message ?? 'Unknown error'}`, null));
-                    }
-
-                    return res.status(200).json(success(false, res.statusCode, "Unable to approve, Please try again.", null));
-
-                } else {
-                    return res.status(200).json(success(false, res.statusCode, "Apigee response : Developer id not found", null));
-                }
-            }
-        } else {
+        if (!is_admin && !is_checker && !is_maker) {
             return res.status(500).json(success(false, API_STATUS.BACK_TO_DASHBOARD.value, "You do not have checker/maker authority.", null));
         }
+
+        const appData = await CstAppMast.findOne({
+            where: { app_id: _app_id, is_deleted: false },
+            include: [{
+                model: CstCustomer,
+                as: 'customer',
+                where: { is_deleted: false },
+                attributes: ['customer_id', 'email_id', 'developer_id']
+            }],
+            attributes: ['customer_id', 'app_name', 'description', 'expected_volume', 'callback_url', 'ip_addresses', 'cert_public_key', 'app_id', 'in_live_env', 'is_approved', 'is_rejected', 'mkr_is_approved', 'mkr_is_rejected']
+        });
+
+        if (!appData) {
+            return res.status(200).json(success(false, res.statusCode, "App details not found.", null));
+        }
+
+        const appInfo = {
+            customer_id: appData.customer_id,
+            app_name: appData.app_name,
+            callback_url: appData.callback_url || "",
+            ip_addresses: appData.ip_addresses || "",
+            cert_public_key: appData.cert_public_key || "",
+            in_live_env: !!appData.in_live_env,
+            is_approved: appData.is_approved,
+            is_rejected: appData.is_rejected,
+            mkr_is_approved: appData.mkr_is_approved,
+            mkr_is_rejected: appData.mkr_is_rejected,
+            email_id: appData.customer?.email_id,
+            developer_id: appData.customer?.developer_id
+        };
+
+        const validation = validateAppApprovalStatus(appInfo, is_maker);
+        if (!validation.valid) {
+            return res.status(200).json(success(false, res.statusCode, validation.message, null));
+        }
+
+        let result;
+        if (is_maker) {
+            result = await processMakerApproval(CstAppMast, _app_id, req.token_data, remark, appInfo);
+        } else {
+            result = await processCheckerAdminApproval(CstAppMast, CstAppProduct, Product, _app_id, req.token_data, remark, appInfo, is_admin);
+        }
+
+        return res.status(200).json(success(result.success, res.statusCode, result.message, null));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
     }
 };
 
+// Helper: Validate app rejection status
+const validateAppRejectionStatus = (appData, is_maker) => {
+    if (appData.mkr_is_rejected || appData.is_rejected) {
+        return { valid: false, message: "App is already rejected." };
+    }
+    if (appData.is_approved) {
+        return { valid: false, message: "App is approved, can not reject" };
+    }
+    if (is_maker && appData.mkr_is_approved) {
+        return { valid: false, message: "App is approved, can not reject" };
+    }
+    return { valid: true };
+};
+
+// Helper: Log rejection action
+const logRejectionAction = (tokenData, appData, rejecterType) => {
+    try {
+        const envLabel = appData.in_live_env ? 'Live' : 'Sandbox';
+        const data_to_log = {
+            correlation_id: correlator.getId(),
+            token_id: tokenData.token_id,
+            account_id: tokenData.account_id,
+            user_type: 1,
+            user_id: tokenData.admin_id,
+            narration: `${envLabel} app rejected by ${rejecterType}. Customer email = ${appData.email_id}, App name = ${appData.app_name}`,
+            query: `CstAppMast.update({ rejection update })`,
+        };
+        action_logger.info(JSON.stringify(data_to_log));
+    } catch (_) { /* ignore logging errors */ }
+};
+
+// Helper: Process rejection
+const processRejection = async (CstAppMast, appId, tokenData, remark, appData, is_maker, is_admin) => {
+    const updateData = is_maker
+        ? {
+            mkr_is_rejected: true,
+            mkr_rejected_by: tokenData.account_id,
+            mkr_rejected_date: db.get_ist_current_date(),
+            mkr_rejected_rmk: remark
+        }
+        : {
+            is_rejected: true,
+            rejected_by: tokenData.account_id,
+            rejected_date: db.get_ist_current_date(),
+            reject_remark: remark
+        };
+
+    const [affectedRows] = await CstAppMast.update(updateData, { where: { app_id: appId } });
+
+    if (affectedRows > 0) {
+        const rejecterType = is_maker ? 'maker' : (is_admin ? 'admin' : 'checker');
+        logRejectionAction(tokenData, appData, rejecterType);
+        return { success: true, message: "App rejected successfully." };
+    }
+    return { success: false, message: "Unable to reject, Please try again." };
+};
+
 const app_req_reject = async (req, res, next) => {
     const { app_id, remark } = req.body;
     try {
         const { CstAppMast, CstCustomer } = getModels();
-        let _app_id = app_id && validator.isNumeric(app_id.toString()) ? parseInt(app_id) : 0;
+        const _app_id = app_id && validator.isNumeric(app_id.toString()) ? parseInt(app_id) : 0;
+
         if (!remark || remark.length <= 0) {
             return res.status(200).json(success(false, res.statusCode, "Please enter remark.", null));
         }
 
         const [is_admin, is_checker, is_maker] = await commonModule.getUserRoles(req);
 
-        if (is_admin || is_checker || is_maker) {
-            const appData = await CstAppMast.findOne({
-                where: { app_id: _app_id, is_deleted: false },
-                include: [{ model: CstCustomer, as: 'customer', attributes: ['email_id'] }],
-                attributes: ['app_id', 'app_name', 'in_live_env', 'is_approved', 'is_rejected', 'mkr_is_approved', 'mkr_is_rejected']
-            });
-
-            if (!appData) {
-                return res.status(200).json(success(false, res.statusCode, "App details not found.", null));
-            }
-
-            const row1 = [{
-                app_id: appData.app_id,
-                app_name: appData.app_name,
-                in_live_env: appData.in_live_env,
-                email_id: appData.customer?.email_id,
-                is_approved: appData.is_approved,
-                is_rejected: appData.is_rejected,
-                mkr_is_approved: appData.mkr_is_approved,
-                mkr_is_rejected: appData.mkr_is_rejected
-            }];
-
-            if ((row1[0].mkr_is_rejected && row1[0].mkr_is_rejected == true) ||
-                (row1[0].is_rejected && row1[0].is_rejected == true)) {
-                return res.status(200).json(success(false, res.statusCode, "App is already rejected.", null));
-            }
-            if (row1[0].is_approved && row1[0].is_approved == true) {
-                return res.status(200).json(success(false, res.statusCode, "App is approved, can not reject", null));
-            }
-            if (is_maker) {
-                if (row1[0].mkr_is_approved && row1[0].mkr_is_approved == true) {
-                    return res.status(200).json(success(false, res.statusCode, "App is approved, can not reject", null));
-                }
-            }
-            const in_live_env = !!row1[0].in_live_env;
-            if (is_maker) {
-                const [affectedRows] = await CstAppMast.update(
-                    {
-                        mkr_is_rejected: true,
-                        mkr_rejected_by: req.token_data.account_id,
-                        mkr_rejected_date: db.get_ist_current_date(),
-                        mkr_rejected_rmk: remark
-                    },
-                    { where: { app_id: _app_id } }
-                );
-
-                if (affectedRows > 0) {
-                    try {
-                        let data_to_log = {
-                            correlation_id: correlator.getId(),
-                            token_id: req.token_data.token_id,
-                            account_id: req.token_data.account_id,
-                            user_type: 1,
-                            user_id: req.token_data.admin_id,
-                            narration: (in_live_env ? 'Live' : 'Sandbox') + ' app rejected by maker. Customer email = ' + row1[0].email_id + ', App name = ' + row1[0].app_name,
-                            query: `CstAppMast.update({ mkr_is_rejected: true }, { where: { app_id: ${_app_id} }})`,
-                        }
-                        action_logger.info(JSON.stringify(data_to_log));
-                    } catch (_) {
-                    }
-                    return res.status(200).json(success(true, res.statusCode, "App rejected successfully.", null));
-                } else {
-                    return res.status(200).json(success(false, res.statusCode, "Unable to reject, Please try again.", null));
-                }
-            } else {
-                const [affectedRows] = await CstAppMast.update(
-                    {
-                        is_rejected: true,
-                        rejected_by: req.token_data.account_id,
-                        rejected_date: db.get_ist_current_date(),
-                        reject_remark: remark
-                    },
-                    { where: { app_id: _app_id } }
-                );
-
-                if (affectedRows > 0) {
-                    try {
-                        let data_to_log = {
-                            correlation_id: correlator.getId(),
-                            token_id: req.token_data.token_id,
-                            account_id: req.token_data.account_id,
-                            user_type: 1,
-                            user_id: req.token_data.admin_id,
-                            narration: (in_live_env ? 'Live' : 'Sandbox') + ' app rejected by ' + (is_admin ? 'admin' : 'checker') + '. Customer email = ' + row1[0].email_id + ', App name = ' + row1[0].app_name,
-                            query: `CstAppMast.update({ is_rejected: true }, { where: { app_id: ${_app_id} }})`,
-                        }
-                        action_logger.info(JSON.stringify(data_to_log));
-                    } catch (_) {
-                    }
-                    return res.status(200).json(success(true, res.statusCode, "App rejected successfully.", null));
-                } else {
-                    return res.status(200).json(success(false, res.statusCode, "Unable to reject, Please try again.", null));
-                }
-            }
-        } else {
+        if (!is_admin && !is_checker && !is_maker) {
             return res.status(500).json(success(false, API_STATUS.BACK_TO_DASHBOARD.value, "You do not have checker/maker authority.", null));
         }
+
+        const appData = await CstAppMast.findOne({
+            where: { app_id: _app_id, is_deleted: false },
+            include: [{ model: CstCustomer, as: 'customer', attributes: ['email_id'] }],
+            attributes: ['app_id', 'app_name', 'in_live_env', 'is_approved', 'is_rejected', 'mkr_is_approved', 'mkr_is_rejected']
+        });
+
+        if (!appData) {
+            return res.status(200).json(success(false, res.statusCode, "App details not found.", null));
+        }
+
+        const appInfo = {
+            app_id: appData.app_id,
+            app_name: appData.app_name,
+            in_live_env: !!appData.in_live_env,
+            email_id: appData.customer?.email_id,
+            is_approved: appData.is_approved,
+            is_rejected: appData.is_rejected,
+            mkr_is_approved: appData.mkr_is_approved,
+            mkr_is_rejected: appData.mkr_is_rejected
+        };
+
+        const validation = validateAppRejectionStatus(appInfo, is_maker);
+        if (!validation.valid) {
+            return res.status(200).json(success(false, res.statusCode, validation.message, null));
+        }
+
+        const result = await processRejection(CstAppMast, _app_id, req.token_data, remark, appInfo, is_maker, is_admin);
+        return res.status(200).json(success(result.success, res.statusCode, result.message, null));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
@@ -862,14 +881,8 @@ const app_req_live = async (req, res, next) => {
         let _search_text = search_text && search_text.length > 0 ? search_text : "";
         const offset = (_page_no - 1) * process.env.PAGINATION_SIZE;
 
-        // Helper function to get products for an app
-        const getAppProducts = async (app_id) => {
-            const appProducts = await CstAppProduct.findAll({
-                where: { app_id },
-                include: [{ model: Product, as: 'product', attributes: ['product_name'], required: true }]
-            });
-            return appProducts.map(ap => ap.product.product_name).join(', ');
-        };
+        // Use shared helper function for products
+        const getAppProducts = (app_id) => getAppProductsForApp(app_id, CstAppProduct, Product);
 
         const searchCondition = _search_text ? {
             [Op.or]: [
@@ -904,22 +917,21 @@ const app_req_live = async (req, res, next) => {
             offset
         });
 
-        let list = [];
+        const list = [];
         let sr_no = offset;
         for (const app of rows) {
             sr_no++;
             const products = await getAppProducts(app.app_id);
-            const full_name = `${app.customer?.first_name || ''} ${app.customer?.last_name || ''}`.trim();
             list.push({
                 sr_no,
                 app_id: app.app_id,
-                full_name,
+                full_name: formatFullName(app.customer),
                 email_id: app.customer?.email_id || '',
                 mobile_no: app.customer?.mobile_no || '',
                 app_name: app.app_name,
                 products,
                 live_remark: app.live_remark,
-                live_date: app.live_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(app.live_date)) : "",
+                live_date: formatDateField(app.live_date),
             });
         }
 
@@ -935,11 +947,71 @@ const app_req_live = async (req, res, next) => {
     }
 };
 
+// Helper: Toggle Apigee app status
+const toggleApigeeAppStatus = async (email_id, app_name, newStatus) => {
+    const product_URL = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/developers/${email_id}/apps/${app_name}?action=${newStatus}`;
+    const apigeeAuth = await db.get_apigee_token();
+    const response = await fetch(product_URL, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apigeeAuth}`, "Content-Type": "application/octet-stream" },
+    });
+    return response;
+};
+
+// Helper: Log status change action
+const logStatusChangeAction = (tokenData, appData, customerData, apigee_status) => {
+    try {
+        const envLabel = appData.in_live_env ? 'Live' : 'Sandbox';
+        const statusLabel = apigee_status === 'approve' ? 'enabled' : 'disabled';
+        const data_to_log = {
+            correlation_id: correlator.getId(),
+            token_id: tokenData.token_id,
+            account_id: tokenData.account_id,
+            user_type: 1,
+            user_id: tokenData.admin_id,
+            narration: `${envLabel} app ${statusLabel}. Customer email = ${customerData.email_id}, App name = ${appData.app_name}`,
+            query: `CstAppMast.update({ apigee_status: '${apigee_status}' })`,
+        };
+        action_logger.info(JSON.stringify(data_to_log));
+    } catch (_) { /* ignore logging errors */ }
+};
+
+// Helper: Process status change in database
+const processStatusChange = async (CstAppMast, CstAppStatus, appId, tokenData, status_remark, apigee_status, appData, customerData) => {
+    const [affectedRows] = await CstAppMast.update(
+        {
+            apigee_status: apigee_status,
+            modify_date: db.get_ist_current_date(),
+            modify_by: tokenData.account_id
+        },
+        { where: { app_id: appId } }
+    );
+
+    if (affectedRows <= 0) {
+        return { success: false, message: "Unable to change status, Please try again." };
+    }
+
+    const newStatus = await CstAppStatus.create({
+        app_id: appId,
+        app_status: apigee_status,
+        remark: status_remark,
+        updated_by: tokenData.account_id,
+        update_date: db.get_ist_current_date()
+    });
+
+    if (newStatus?.id) {
+        logStatusChangeAction(tokenData, appData, customerData, apigee_status);
+    }
+
+    return { success: true, message: "Status changed successfully." };
+};
+
 const app_req_status_change = async (req, res, next) => {
     const { app_id, status_remark } = req.body;
     try {
         const { CstAppMast, CstCustomer, CstAppStatus } = getModels();
-        let _app_id = app_id && validator.isNumeric(app_id.toString()) ? parseInt(app_id) : 0;
+        const _app_id = app_id && validator.isNumeric(app_id.toString()) ? parseInt(app_id) : 0;
+
         if (!status_remark || status_remark.length <= 0) {
             return res.status(200).json(success(false, res.statusCode, "Please enter remark.", null));
         }
@@ -950,143 +1022,172 @@ const app_req_status_change = async (req, res, next) => {
             raw: true
         });
 
-        if (!appData) {
+        if (!appData?.app_name) {
             return res.status(200).json(success(false, res.statusCode, "App details not found.", null));
         }
 
-        if (appData.app_name && appData.app_name.length > 0) {
-            const customerData = await CstCustomer.findOne({
-                where: { customer_id: appData.customer_id, is_deleted: false },
-                attributes: ['developer_id', 'email_id'],
-                raw: true
-            });
+        const customerData = await CstCustomer.findOne({
+            where: { customer_id: appData.customer_id, is_deleted: false },
+            attributes: ['developer_id', 'email_id'],
+            raw: true
+        });
 
-            if (customerData) {
-                const email_id = customerData.email_id;
-                const app_name = appData.app_name;
-                const in_live_env = !!appData.in_live_env;
-                const apigee_status = appData.apigee_status && appData.apigee_status == 'approve' ? 'revoke' : 'approve';
-                console.log("=======apigee_status==========", apigee_status);
-                const product_URL = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/developers/${email_id}/apps/${app_name}?action=${apigee_status}`;
-                const apigeeAuth = await db.get_apigee_token();
-                const response = await fetch(product_URL, {
-                    method: "POST",
-                    headers: { Authorization: `Bearer ${apigeeAuth}`, "Content-Type": "application/octet-stream", },
-                });
-                console.log("=======response==========", response);
-
-                if (response.status != 204) {
-                    return res.status(200).json(success(false, res.statusCode, "Apigee response : " + response.statusText, null));
-                }
-                if (response.status == 204) {
-                    const [affectedRows] = await CstAppMast.update(
-                        {
-                            apigee_status: apigee_status,
-                            modify_date: db.get_ist_current_date(),
-                            modify_by: req.token_data.account_id
-                        },
-                        { where: { app_id: _app_id } }
-                    );
-
-                    if (affectedRows > 0) {
-                        const newStatus = await CstAppStatus.create({
-                            app_id: _app_id,
-                            app_status: apigee_status,
-                            remark: status_remark,
-                            updated_by: req.token_data.account_id,
-                            update_date: db.get_ist_current_date()
-                        });
-
-                        if (newStatus && newStatus.id) {
-                            try {
-                                let data_to_log = {
-                                    correlation_id: correlator.getId(),
-                                    token_id: req.token_data.token_id,
-                                    account_id: req.token_data.account_id,
-                                    user_type: 1,
-                                    user_id: req.token_data.admin_id,
-                                    narration: (in_live_env ? 'Live' : 'Sandbox') + ' app ' + (apigee_status == 'approve' ? 'enabled' : 'disabled') + '. Customer email = ' + customerData.email_id + ', App name = ' + appData.app_name,
-                                    query: `CstAppStatus.create({ app_id: ${_app_id}, app_status: '${apigee_status}' })`,
-                                }
-                                action_logger.info(JSON.stringify(data_to_log));
-                            } catch (_) { }
-                        }
-                        try {
-                            let data_to_log = {
-                                correlation_id: correlator.getId(),
-                                token_id: req.token_data.token_id,
-                                account_id: req.token_data.account_id,
-                                user_type: 1,
-                                user_id: req.token_data.admin_id,
-                                narration: (in_live_env ? 'Live' : 'Sandbox') + ' app ' + (apigee_status == 'approve' ? 'enabled' : 'disabled') + '. Customer email = ' + customerData.email_id + ', App name = ' + appData.app_name,
-                                query: `CstAppMast.update({ apigee_status: '${apigee_status}' }, { where: { app_id: ${_app_id} }})`,
-                            }
-                            action_logger.info(JSON.stringify(data_to_log));
-                        } catch (_) { }
-
-                        return res.status(200).json(success(true, res.statusCode, "Status changed successfully.", null));
-                    } else {
-                        return res.status(200).json(success(false, res.statusCode, "Unable to change status, Please try again.", null));
-                    }
-                }
-                else {
-                    return res.status(200).json(success(false, res.statusCode, "Unable to change status, Please try again.", null));
-                }
-            }
-            else {
-                return res.status(200).json(success(false, res.statusCode, "Unable to change status, Please try again.", null));
-            }
-        }
-        else {
+        if (!customerData) {
             return res.status(200).json(success(false, res.statusCode, "Unable to change status, Please try again.", null));
         }
-    }
-    catch (err) {
+
+        const apigee_status = appData.apigee_status === 'approve' ? 'revoke' : 'approve';
+        const response = await toggleApigeeAppStatus(customerData.email_id, appData.app_name, apigee_status);
+
+        if (response.status !== 204) {
+            return res.status(200).json(success(false, res.statusCode, "Apigee response : " + response.statusText, null));
+        }
+
+        const appInfo = { ...appData, in_live_env: !!appData.in_live_env };
+        const result = await processStatusChange(CstAppMast, CstAppStatus, _app_id, req.token_data, status_remark, apigee_status, appInfo, customerData);
+        return res.status(200).json(success(result.success, res.statusCode, result.message, null));
+    } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
     }
+};
+
+// Helper: Extract service ratios from tab
+const extractServiceRatios = (services) => {
+    let Ratio_Signzy = '';
+    let Ratio_Karza = '';
+    services.forEach(service => {
+        const serviceName = service.name.toLowerCase();
+        if (serviceName === 'signzy') {
+            Ratio_Signzy = service.value;
+        } else if (serviceName === 'karza') {
+            Ratio_Karza = service.value;
+        }
+    });
+    return { Ratio_Signzy, Ratio_Karza };
+};
+
+// Helper: Validate routing logic input
+const validateRoutingLogic = (app_routing_logic) => {
+    for (const [product_id, tabs] of Object.entries(app_routing_logic)) {
+        for (const tab of tabs) {
+            if (!tab.isSelectedTab) continue;
+
+            const tabType = tab.name.split(/(\d+)/)[0];
+            if (tabType === 'Split') {
+                const { Ratio_Signzy, Ratio_Karza } = extractServiceRatios(tab.services || []);
+                if (!Ratio_Signzy) {
+                    return { valid: false, message: `Please insert value for Signzy in product tab: ${product_id}` };
+                }
+                if (!Ratio_Karza) {
+                    return { valid: false, message: `Please insert value for Karza in product tab: ${product_id}` };
+                }
+            } else if (!tab.selectedService) {
+                return { valid: false, message: `Please select a service in product: ${product_id}` };
+            }
+        }
+    }
+    return { valid: true };
+};
+
+// Helper: Build KVM value based on tab type
+const buildKvmValueForTab = (tab) => {
+    const tabType = tab.name.split(/(\d+)/)[0];
+    const selectedService = tab.selectedService;
+    const baseKvm = {
+        signzy: '0.0',
+        karza: '0.0',
+        getTime: moment().format('YYYYMMDDHHmmss'),
+    };
+
+    switch (tabType) {
+        case 'Fix':
+            return {
+                ...baseKvm,
+                Ratio_S: selectedService === "Signzy" ? 1 : 0,
+                Ratio_K: selectedService === "Karza" ? 1 : 0,
+                fallback: "false"
+            };
+        case 'Split': {
+            const { Ratio_Signzy, Ratio_Karza } = extractServiceRatios(tab.services || []);
+            return {
+                ...baseKvm,
+                Ratio_S: Ratio_Signzy,
+                Ratio_K: Ratio_Karza,
+                fallback: tab.isFallback ? 'true' : 'false'
+            };
+        }
+        case 'Fallback':
+            return {
+                ...baseKvm,
+                Ratio_S: selectedService === "Signzy" ? 1 : 0,
+                Ratio_K: selectedService === "Karza" ? 1 : 0,
+                fallback: 'true'
+            };
+        default:
+            throw new Error(`Unknown tab type: ${tabType}`);
+    }
+};
+
+// Helper: Update routing KVM in Apigee
+const updateRoutingKvm = async (appInfo, app_routing_logic) => {
+    const kvm_environment = appInfo.in_live_env ? 'prod-01' : 'uat-01';
+    const hasExistingKvm = appInfo.app_kvm_json_data && appInfo.app_kvm_json_data.length > 0;
+
+    for (const [product_id, tabs] of Object.entries(app_routing_logic)) {
+        let kvm_value = {};
+        for (const tab of tabs) {
+            if (tab.isSelectedTab) {
+                kvm_value = buildKvmValueForTab(tab);
+            }
+        }
+
+        const kvm_name = `${appInfo.apigee_app_id}_${product_id}`;
+        const kvm_2 = { name: kvm_name, value: JSON.stringify(kvm_value) };
+        const method = hasExistingKvm ? 'PUT' : 'POST';
+        const kvm_url = hasExistingKvm
+            ? `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/environments/${kvm_environment}/keyvaluemaps/routingLogic-KS/entries/${kvm_name}`
+            : `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/environments/${kvm_environment}/keyvaluemaps/routingLogic-KS/entries`;
+
+        const apigeeAuth = await db.get_apigee_token();
+        await fetch(kvm_url, {
+            method,
+            headers: { Authorization: `Bearer ${apigeeAuth}`, "Content-Type": "application/json" },
+            body: JSON.stringify(kvm_2),
+        });
+    }
+};
+
+// Helper: Log routing KVM update
+const logRoutingKvmUpdate = (tokenData, appInfo, appId) => {
+    try {
+        const envLabel = appInfo.in_live_env ? 'Live' : 'UAT';
+        const data_to_log = {
+            correlation_id: correlator.getId(),
+            token_id: tokenData.token_id,
+            account_id: tokenData.account_id,
+            user_type: 1,
+            user_id: tokenData.admin_id,
+            narration: `${envLabel} app kvm update by admin. App Id = ${appId}, App name = ${appInfo.app_name}`,
+            query: `CstAppMast.update({ app_routing_logic: '...' }, { where: { app_id: ${appId} }})`,
+        };
+        action_logger.info(JSON.stringify(data_to_log));
+    } catch (_) { /* ignore logging errors */ }
 };
 
 const app_routing_logic_kvm_update = async (req, res, next) => {
     const { app_id, app_routing_logic } = req.body;
     try {
         const { CstAppMast, CstCustomer } = getModels();
-        let _app_id = app_id && validator.isNumeric(app_id.toString()) ? parseInt(app_id) : 0;
+        const _app_id = app_id && validator.isNumeric(app_id.toString()) ? parseInt(app_id) : 0;
+
         if (!app_routing_logic) {
             return res.status(200).json(success(false, res.statusCode, "Please enter ratio.", null));
         }
-        for (const [product_id, tabs] of Object.entries(app_routing_logic)) {
-            for (const tab of tabs) {
-                const selectedService = tab.selectedService;
-                const tabType = tab.name.split(/(\d+)/)[0];
 
-                if (tab.isSelectedTab && tab.isSelectedTab === true) {
-                    if (tabType === 'Split') {
-                        let Ratio_Signzy = '';
-                        let Ratio_Karza = '';
-
-                        tab.services.forEach(service => {
-                            if (service.name.toLowerCase() === 'signzy') {
-                                Ratio_Signzy = service.value;
-                            }
-                            if (service.name.toLowerCase() === 'karza') {
-                                Ratio_Karza = service.value;
-                            }
-                        });
-
-                        if (!Ratio_Signzy) {
-                            return res.status(200).json(success(false, res.statusCode, `Please insert value for Signzy in product tab: ${product_id}`, null));
-                        }
-
-                        if (!Ratio_Karza) {
-                            return res.status(200).json(success(false, res.statusCode, `Please insert value for Karza in product tab: ${product_id}`, null));
-                        }
-
-                    } else if (!selectedService) {
-                        return res.status(200).json(success(false, res.statusCode, `Please select a service in product: ${product_id}`, null));
-                    }
-                }
-            }
+        const validation = validateRoutingLogic(app_routing_logic);
+        if (!validation.valid) {
+            return res.status(200).json(success(false, res.statusCode, validation.message, null));
         }
 
         const appData = await CstAppMast.findOne({
@@ -1104,19 +1205,12 @@ const app_routing_logic_kvm_update = async (req, res, next) => {
             return res.status(200).json(success(false, res.statusCode, "App details not found.", null));
         }
 
-        const row1 = [{
-            customer_id: appData.customer_id,
+        const appInfo = {
             app_name: appData.app_name,
-            description: appData.description,
-            in_live_env: appData.in_live_env,
-            app_id: appData.app_id,
+            in_live_env: !!appData.in_live_env,
             apigee_app_id: appData.apigee_app_id,
-            email_id: appData.customer?.email_id,
-            developer_id: appData.customer?.developer_id,
             app_kvm_json_data: appData.app_kvm_json_data
-        }];
-
-        const in_live_env = !!row1[0].in_live_env;
+        };
 
         const [affectedRows] = await CstAppMast.update(
             {
@@ -1127,142 +1221,64 @@ const app_routing_logic_kvm_update = async (req, res, next) => {
             { where: { app_id: _app_id } }
         );
 
-        const i = affectedRows;
-        if (i > 0) {
-            try {
-                for (const [product_id, tabs] of Object.entries(app_routing_logic)) {
-                    let kvm_name = ''; let kvm_value = {};
-                    for (const tab of tabs) {
-                        const selectedService = tab.selectedService;
-                        const isFallback = tab.isFallback;
-                        const tabType = tab.name.split(/(\d+)/)[0];
-                        if (tab.isSelectedTab) {
-                            switch (tabType) {
-                                case 'Fix':
-                                    kvm_value = {
-                                        signzy: '0.0',
-                                        karza: '0.0',
-                                        getTime: moment().format('YYYYMMDDHHmmss'),
-                                        Ratio_S: selectedService && selectedService == "Signzy" ? 1 : 0,
-                                        Ratio_K: selectedService && selectedService == "Karza" ? 1 : 0,
-                                        fallback: "false"
-                                    }
-                                    break;
-
-                                case 'Split':
-                                    let Ratio_Signzy = ''; let Ratio_Karza = '';
-                                    tab.services.forEach(service => {
-                                        if (service.name.toLowerCase() === 'signzy') {
-                                            Ratio_Signzy = service.value;
-                                        }
-                                        if (service.name.toLowerCase() === 'karza') {
-                                            Ratio_Karza = service.value;
-                                        }
-                                    });
-
-                                    kvm_value = {
-                                        signzy: '0.0',
-                                        karza: '0.0',
-                                        getTime: moment().format('YYYYMMDDHHmmss'),
-                                        Ratio_S: Ratio_Signzy,
-                                        Ratio_K: Ratio_Karza,
-                                        fallback: isFallback ? 'true' : 'false'
-
-                                    }
-                                    break;
-
-                                case 'Fallback':
-                                    kvm_value = {
-                                        signzy: '0.0',
-                                        karza: '0.0',
-                                        getTime: moment().format('YYYYMMDDHHmmss'),
-                                        Ratio_S: selectedService && selectedService == "Signzy" ? 1 : 0,
-                                        Ratio_K: selectedService && selectedService == "Karza" ? 1 : 0,
-                                        fallback: 'true'
-                                    }
-                                    break;
-
-                                default:
-                                    throw new Error(`Unknown tab type: ${tabType}`);
-                            }
-                        }
-                    }
-
-                    kvm_name = row1[0].apigee_app_id + '_' + product_id;
-                    let kvm_2 = { "name": kvm_name, "value": JSON.stringify(kvm_value), };
-                    console.log("=========================kvm_2=================", kvm_2)
-
-                    let kvm_url = '';
-                    let method = '';
-                    const kvm_environment = in_live_env ? 'prod-01' : 'uat-01';
-                    if (!row1[0].app_kvm_json_data || row1[0].app_kvm_json_data.length === 0) {
-                        kvm_url = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/environments/${kvm_environment}/keyvaluemaps/routingLogic-KS/entries`
-                        method = 'POST';
-                    }
-                    else {
-                        kvm_url = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/environments/${kvm_environment}/keyvaluemaps/routingLogic-KS/entries/${kvm_name}`
-                        method = 'PUT';
-                    }
-                    console.log(method + "___kvm_url ============", kvm_url);
-                    const apigeeAuth = await db.get_apigee_token();
-                    const kvm_response = await fetch(kvm_url, {
-                        method: method,
-                        headers: { Authorization: `Bearer ${apigeeAuth}`, "Content-Type": "application/json", },
-                        body: JSON.stringify(kvm_2),
-                    });
-                    const kvm_responseData = await kvm_response.json();
-                    console.log("====kvm_responseData====:", kvm_responseData);
-                    // const _query10 = `UPDATE cst_app_mast SET app_routing_logic = ?, app_kvm_json_data = ? WHERE app_id = ?`;
-                    // await db.sequelize.query(_query10, { replacements: [JSON.stringify(kvm_responseData), _app_id], type: QueryTypes.UPDATE });
-                    // console.log("-------------", product_id);
-                }
-            } catch (_) { console.log("-------------", _.message); }
-
-            try {
-                let data_to_log = {
-                    correlation_id: correlator.getId(),
-                    token_id: req.token_data.token_id,
-                    account_id: req.token_data.account_id,
-                    user_type: 1,
-                    user_id: req.token_data.admin_id,
-                    narration: (in_live_env ? 'Live' : 'UAT') + ' app kvm update by  admin. App Id = ' + _app_id + ', App name = ' + row1[0].app_name,
-                    query: `CstAppMast.update({ app_routing_logic: '...' }, { where: { app_id: ${_app_id} }})`,
-                }
-                action_logger.info(JSON.stringify(data_to_log));
-            } catch (_) { console.log("---catch----------"); }
-
-            return res.status(200).json(success(true, res.statusCode, "App Routing KVM Updated successfully.", null));
-        }
-        else {
+        if (affectedRows <= 0) {
             return res.status(200).json(success(false, res.statusCode, "Unable to process, Please try again.", null));
         }
+
+        try {
+            await updateRoutingKvm(appInfo, app_routing_logic);
+        } catch (kvmError) {
+            _logger.error('KVM update error: ' + kvmError.message);
+        }
+
+        logRoutingKvmUpdate(req.token_data, appInfo, _app_id);
+        return res.status(200).json(success(true, res.statusCode, "App Routing KVM Updated successfully.", null));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
     }
 };
 
+// Helper: Parse routing logic safely
+const parseRoutingLogic = (app_routing_logic) => {
+    try {
+        return app_routing_logic ? JSON.parse(app_routing_logic) : {};
+    } catch (error) {
+        _logger.error('Error parsing app_routing_logic: ' + error.message);
+        return {};
+    }
+};
+
+// Helper: Build product list with routing
+const buildProductListWithRouting = (appProducts, routingLogic) => {
+    return appProducts.map(appProduct => {
+        const item = appProduct.product;
+        const productRouting = routingLogic[item.product_name] || [];
+        return {
+            id: item.product_id,
+            name: item.product_name,
+            tabs: routingLogic[item.product_id] || [],
+            activeTabId: productRouting.length > 0 ? productRouting[0].id : '',
+        };
+    });
+};
+
 const app_product_list_get = async (req, res, next) => {
     const { app_id } = req.body;
     try {
         const { CstAppMast, CstCustomer, CstAppProduct, Product } = getModels();
-        let _app_id = app_id && validator.isNumeric(app_id.toString()) ? parseInt(app_id) : 0;
+        const _app_id = app_id && validator.isNumeric(app_id.toString()) ? parseInt(app_id) : 0;
 
         const appData = await CstAppMast.findOne({
             where: { app_id: _app_id, is_deleted: false },
-            include: [{
-                model: CstCustomer,
-                as: 'customer',
-                attributes: ['first_name', 'last_name']
-            }],
+            include: [{ model: CstCustomer, as: 'customer', attributes: ['first_name', 'last_name'] }],
             attributes: ['app_id', 'app_name', 'description', 'app_routing_logic']
         });
 
-        let apps_data = {}; let products = [];
-        if (appData) {
-            const full_name = `${appData.customer?.first_name || ''} ${appData.customer?.last_name || ''}`.trim();
+        let apps_data = {};
+        let products = [];
 
-            // Get products for the app with routing applicable
+        if (appData) {
             const appProducts = await CstAppProduct.findAll({
                 where: { app_id: _app_id },
                 include: [{
@@ -1275,22 +1291,8 @@ const app_product_list_get = async (req, res, next) => {
                 order: [[{ model: Product, as: 'product' }, 'product_id', 'ASC']]
             });
 
-            for (const appProduct of appProducts) {
-                const item = appProduct.product;
-                let routingLogic = {};
-                try {
-                    routingLogic = appData.app_routing_logic ? JSON.parse(appData.app_routing_logic) : {};
-                } catch (error) {
-                    console.log('Error parsing app_routing_logic:', error);
-                    routingLogic = {};
-                }
-                products.push({
-                    id: item.product_id,
-                    name: item.product_name,
-                    tabs: routingLogic[item.product_id] || [],
-                    activeTabId: routingLogic[item.product_name] && routingLogic[item.product_name].length > 0 ? routingLogic[item.product_name][0].id : '',
-                });
-            }
+            const routingLogic = parseRoutingLogic(appData.app_routing_logic);
+            products = buildProductListWithRouting(appProducts, routingLogic);
 
             apps_data = {
                 app_id: appData.app_id,
@@ -1298,15 +1300,12 @@ const app_product_list_get = async (req, res, next) => {
                 app_routing_logic: appData.app_routing_logic,
                 display_name: appData.display_name,
                 description: appData.description,
-                full_name: full_name,
+                full_name: formatFullName(appData.customer),
                 routing_tab_data: Constants.routing_tab_data,
-            }
+            };
         }
-        const results = {
-            apps_data: apps_data,
-            app_products_list: products,
-        };
 
+        const results = { apps_data, app_products_list: products };
         return res.status(200).json(success(true, res.statusCode, "My Apps Data.", results));
     } catch (err) {
         _logger.error(err.stack);
@@ -1314,20 +1313,45 @@ const app_product_list_get = async (req, res, next) => {
     }
 };
 
+// Helper: Add product rate to Apigee
+const addApigeeProductRate = async (email_id, app_name, product_data) => {
+    const data = { attribute: product_data };
+    const product_URL = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/developers/${email_id}/apps/${app_name}/attributes`;
+    const apigeeAuth = await db.get_apigee_token();
+    const response = await fetch(product_URL, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apigeeAuth}`, "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+    });
+    return response.json();
+};
+
+// Helper: Log product rate addition
+const logProductRateAddition = (tokenData, appInfo) => {
+    try {
+        const envLabel = appInfo.in_live_env ? 'Live' : 'Sandbox';
+        const data_to_log = {
+            correlation_id: correlator.getId(),
+            token_id: tokenData.token_id,
+            account_id: tokenData.account_id,
+            user_type: 1,
+            user_id: tokenData.admin_id,
+            narration: `${envLabel} app product rate added. Customer email = ${appInfo.email_id}, App name = ${appInfo.app_name}`,
+            query: `CstAppMast.update({ app_wallet_rate_data: '...' })`,
+        };
+        action_logger.info(JSON.stringify(data_to_log));
+    } catch (_) { /* ignore logging errors */ }
+};
+
 const app_product_apigee_rate_add = async (req, res, next) => {
     const { app_id, product_data } = req.body;
     try {
         const { CstAppMast, CstCustomer } = getModels();
-        let _app_id = app_id && validator.isNumeric(app_id.toString()) ? parseInt(app_id) : 0;
+        const _app_id = app_id && validator.isNumeric(app_id.toString()) ? parseInt(app_id) : 0;
 
         const appData = await CstAppMast.findOne({
             where: { app_id: _app_id, is_deleted: false },
-            include: [{
-                model: CstCustomer,
-                as: 'customer',
-                where: { is_deleted: false },
-                attributes: ['email_id', 'developer_id']
-            }],
+            include: [{ model: CstCustomer, as: 'customer', where: { is_deleted: false }, attributes: ['email_id', 'developer_id'] }],
             attributes: ['customer_id', 'app_name', 'description', 'app_id', 'in_live_env', 'is_approved', 'is_rejected', 'mkr_is_approved', 'mkr_is_rejected']
         });
 
@@ -1336,137 +1360,117 @@ const app_product_apigee_rate_add = async (req, res, next) => {
         }
 
         const email_id = appData.customer?.email_id;
-        const in_live_env = !!appData.in_live_env;
         const app_name = appData.app_name;
 
-        if (_app_id && app_name.length > 0 && email_id.length > 0) {
-
-            const data = { attribute: product_data };
-            const product_URL = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/developers/${email_id}/apps/${app_name}/attributes`;
-            const apigeeAuth = await db.get_apigee_token();
-            const response = await fetch(product_URL, {
-                method: "POST",
-                headers: { Authorization: `Bearer ${apigeeAuth}`, "Content-Type": "application/json", },
-                body: JSON.stringify(data),
-            });
-
-
-            const responseData = await response.json();
-            console.log("---------------", responseData);
-            console.log("------product_URL---------", product_URL);
-            console.log("------JSON.stringify(data)---------", JSON.stringify(data));
-            if (responseData) {
-                console.log("-----responseData---------", JSON.stringify(responseData));
-                const kvm_rate_response = JSON.stringify(responseData);
-
-                const [affectedRows] = await CstAppMast.update(
-                    {
-                        app_wallet_rate_added_by: req.token_data.account_id,
-                        app_wallet_rate_added_date: db.get_ist_current_date(),
-                        app_wallet_rate_data: JSON.stringify(product_data),
-                        app_wallet_rate_kvm_json_data: kvm_rate_response
-                    },
-                    { where: { app_id: _app_id } }
-                );
-
-                if (affectedRows > 0) {
-                    try {
-                        let data_to_log = {
-                            correlation_id: correlator.getId(),
-                            token_id: req.token_data.token_id,
-                            account_id: req.token_data.account_id,
-                            user_type: 1,
-                            user_id: req.token_data.admin_id,
-                            narration: (in_live_env ? 'Live' : 'Sandbox') + ' app product rate added. Customer email = ' + email_id + ', App name = ' + app_name,
-                            query: `CstAppMast.update({ app_wallet_rate_data: '...' }, { where: { app_id: ${_app_id} }})`,
-                        }
-                        action_logger.info(JSON.stringify(data_to_log));
-                    } catch (_) { console.log("---catch----------", _.stack); }
-
-                    return res.status(200).json(success(true, res.statusCode, "App approved successfully.", null));
-                } else {
-                    return res.status(200).json(success(false, res.statusCode, "Unable to approve, Please try again.", null));
-                }
-            }
-            else if ((responseData?.error?.status === 'ABORTED' && responseData?.error?.code === 409) || responseData?.error?.message?.length > 0) {
-                return res.status(200).json(success(false, res.statusCode, `Apigee response : ${responseData?.error?.message ?? 'Unknown error'}`, null));
-            }
-            return res.status(200).json(success(false, res.statusCode, "Unable to approve, Please try again.", null));
-
-        } else {
+        if (!_app_id || !app_name || !email_id) {
             return res.status(200).json(success(false, res.statusCode, "Apigee response : email or app name not found", null));
         }
 
+        const responseData = await addApigeeProductRate(email_id, app_name, product_data);
+
+        if (responseData?.error?.message) {
+            return res.status(200).json(success(false, res.statusCode, `Apigee response : ${responseData.error.message}`, null));
+        }
+
+        if (!responseData) {
+            return res.status(200).json(success(false, res.statusCode, "Unable to approve, Please try again.", null));
+        }
+
+        const [affectedRows] = await CstAppMast.update(
+            {
+                app_wallet_rate_added_by: req.token_data.account_id,
+                app_wallet_rate_added_date: db.get_ist_current_date(),
+                app_wallet_rate_data: JSON.stringify(product_data),
+                app_wallet_rate_kvm_json_data: JSON.stringify(responseData)
+            },
+            { where: { app_id: _app_id } }
+        );
+
+        if (affectedRows <= 0) {
+            return res.status(200).json(success(false, res.statusCode, "Unable to approve, Please try again.", null));
+        }
+
+        const appInfo = { email_id, app_name, in_live_env: !!appData.in_live_env };
+        logProductRateAddition(req.token_data, appInfo);
+        return res.status(200).json(success(true, res.statusCode, "App approved successfully.", null));
     } catch (err) {
-        console.log("------err.message---------", err.stack);
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
     }
+};
+
+// Helper: Toggle monetization KVM in Apigee
+const toggleMonetizationKvm = async (appInfo, newValue) => {
+    const kvm_environment = appInfo.in_live_env ? 'prod-01' : 'uat-01';
+    const kvm_input = { monetisation: newValue };
+    const kvm_2 = { name: appInfo.apigee_app_id, value: JSON.stringify(kvm_input) };
+    const method = appInfo.is_monetization_added ? 'PUT' : 'POST';
+    const kvm_url = appInfo.is_monetization_added
+        ? `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/environments/${kvm_environment}/keyvaluemaps/Monetisation-Enable/entries/${appInfo.apigee_app_id}`
+        : `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/environments/${kvm_environment}/keyvaluemaps/Monetisation-Enable/entries`;
+
+    const apigeeAuth = await db.get_apigee_token();
+    const kvm_response = await fetch(kvm_url, {
+        method,
+        headers: { Authorization: `Bearer ${apigeeAuth}`, "Content-Type": "application/json" },
+        body: JSON.stringify(kvm_2),
+    });
+    return { response: kvm_response, data: await kvm_response.json() };
+};
+
+// Helper: Log monetization toggle
+const logMonetizationToggle = (tokenData, appInfo, newStatus) => {
+    try {
+        const envLabel = appInfo.in_live_env ? 'Live' : 'Sandbox';
+        const statusLabel = appInfo.is_monetization_enabled ? 'disabled' : 'enabled';
+        const data_to_log = {
+            correlation_id: correlator.getId(),
+            token_id: tokenData.token_id,
+            account_id: tokenData.account_id,
+            user_type: 1,
+            user_id: tokenData.admin_id,
+            narration: `${envLabel} ${statusLabel} app monetization status updated. Customer email = ${appInfo.email_id}, App name = ${appInfo.app_name}`,
+            query: `CstAppMast.update({ is_monetization_enabled: ${newStatus} })`,
+        };
+        action_logger.info(JSON.stringify(data_to_log));
+    } catch (_) { /* ignore logging errors */ }
 };
 
 const app_monitization_toggle = async (req, res, next) => {
     const { app_id } = req.body;
     try {
         const { CstAppMast, CstCustomer } = getModels();
-        let _app_id = app_id && validator.isNumeric(app_id.toString()) ? parseInt(app_id) : 0;
+        const _app_id = app_id && validator.isNumeric(app_id.toString()) ? parseInt(app_id) : 0;
 
         const appData = await CstAppMast.findOne({
             where: { app_id: _app_id, is_deleted: false },
-            include: [{
-                model: CstCustomer,
-                as: 'customer',
-                where: { is_deleted: false },
-                attributes: ['email_id', 'developer_id']
-            }],
-            attributes: ['customer_id', 'app_name', 'apigee_app_id', 'description', 'expected_volume', 'callback_url', 'ip_addresses', 'cert_public_key', 'app_id', 'in_live_env', 'is_approved', 'is_rejected', 'mkr_is_approved', 'mkr_is_rejected', 'is_monetization_enabled', 'is_monetization_added']
+            include: [{ model: CstCustomer, as: 'customer', where: { is_deleted: false }, attributes: ['email_id', 'developer_id'] }],
+            attributes: ['customer_id', 'app_name', 'apigee_app_id', 'app_id', 'in_live_env', 'is_monetization_enabled', 'is_monetization_added']
         });
 
         if (!appData) {
             return res.status(200).json(success(false, res.statusCode, "App details not found.", null));
         }
 
-        const row1 = [{
-            customer_id: appData.customer_id,
-            app_name: appData.app_name,
-            apigee_app_id: appData.apigee_app_id,
-            in_live_env: appData.in_live_env,
-            is_monetization_enabled: appData.is_monetization_enabled,
-            is_monetization_added: appData.is_monetization_added,
-            email_id: appData.customer?.email_id
-        }];
-
-        if (!row1[0].apigee_app_id) {
+        if (!appData.apigee_app_id) {
             return res.status(200).json(success(false, res.statusCode, "Apigee App Id not found.", null));
         }
-        const in_live_env = !!row1[0].in_live_env;
-        const apigee_app_id = row1[0].apigee_app_id;
+
+        const appInfo = {
+            app_name: appData.app_name,
+            apigee_app_id: appData.apigee_app_id,
+            in_live_env: !!appData.in_live_env,
+            is_monetization_enabled: appData.is_monetization_enabled,
+            is_monetization_added: !!appData.is_monetization_added,
+            email_id: appData.customer?.email_id
+        };
+
+        const newEnabledStatus = !appInfo.is_monetization_enabled;
+
         try {
-            let kvm_url = '';
-            let method = '';
-            const value_data = !row1[0].is_monetization_enabled;
-            const kvm_input = { monetisation: value_data };
-            const kvm_2 = { "name": apigee_app_id, "value": JSON.stringify(kvm_input), };
-            const kvm_environment = in_live_env ? 'prod-01' : 'uat-01';
-            if (row1[0].is_monetization_added && row1[0].is_monetization_added == true) {
-                kvm_url = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/environments/${kvm_environment}/keyvaluemaps/Monetisation-Enable/entries/${apigee_app_id}`
-                method = 'PUT';
-            }
-            else {
-                kvm_url = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/environments/${kvm_environment}/keyvaluemaps/Monetisation-Enable/entries`
-                method = 'POST';
-            }
-            console.log("===kvm url====", kvm_url, "===method==", method,);
-            console.log("===kvm_2====", kvm_2);
-            const apigeeAuth = await db.get_apigee_token();
-            const kvm_response = await fetch(kvm_url, {
-                method: method,
-                headers: { Authorization: `Bearer ${apigeeAuth}`, "Content-Type": "application/json", },
-                body: JSON.stringify(kvm_2),
-            });
-            const kvm_responseData = await kvm_response.json();
-            console.log(kvm_responseData);
-            if (kvm_response.ok && kvm_responseData?.name?.length > 0) {
-                const newEnabledStatus = !row1[0].is_monetization_enabled;
+            const { response, data: kvm_responseData } = await toggleMonetizationKvm(appInfo, newEnabledStatus);
+
+            if (response.ok && kvm_responseData?.name) {
                 await CstAppMast.update(
                     {
                         is_monetization_enabled: newEnabledStatus,
@@ -1476,116 +1480,121 @@ const app_monitization_toggle = async (req, res, next) => {
                     },
                     { where: { app_id: _app_id } }
                 );
-
-                try {
-                    let data_to_log = {
-                        correlation_id: correlator.getId(),
-                        token_id: req.token_data.token_id,
-                        account_id: req.token_data.account_id,
-                        user_type: 1,
-                        user_id: req.token_data.admin_id,
-                        narration: (in_live_env ? 'Live' : 'Sandbox') + + (row1[0].is_monetization_enabled ? 'disabled' : 'enabled') + ' app monitazation status updated. Customer email = ' + row1[0].email_id + ', App name = ' + row1[0].app_name,
-                        query: `CstAppMast.update({ is_monetization_enabled: ${newEnabledStatus} }, { where: { app_id: ${_app_id} }})`,
-                    }
-                    action_logger.info(JSON.stringify(data_to_log));
-                } catch (_) { console.log("---catch----------", _); }
-            } else if (kvm_responseData?.error?.message) {
-                const message = `Apigee response: ${kvm_responseData.error.message}`;
-                const statusCode = kvm_responseData.error.status === 'ABORTED' && kvm_responseData.error.code === 409 ? 200 : 400;
-                return res.status(statusCode).json(success(false, statusCode, message, null));
+                logMonetizationToggle(req.token_data, appInfo, newEnabledStatus);
+                return res.status(200).json(success(true, res.statusCode, "App Monetization Status Change successfully.", null));
             }
-            return res.status(200).json(success(false, res.statusCode, "Unable to approve, Please try again.", null));
 
-        } catch (_) { console.log("-------------", _); }
-        return res.status(200).json(success(true, res.statusCode, "App Monitazation Status Change successfully.", null));
+            if (kvm_responseData?.error?.message) {
+                return res.status(200).json(success(false, res.statusCode, `Apigee response: ${kvm_responseData.error.message}`, null));
+            }
+
+            return res.status(200).json(success(false, res.statusCode, "Unable to update, Please try again.", null));
+        } catch (kvmError) {
+            _logger.error('Monetization toggle error: ' + kvmError.message);
+            return res.status(200).json(success(false, res.statusCode, "Unable to update, Please try again.", null));
+        }
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
     }
+};
+
+// Helper: Subscribe single product to Apigee
+const subscribeProductToApigee = async (email_id, productName) => {
+    const data = { apiproduct: productName };
+    const product_URL = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/developers/${email_id}/subscriptions`;
+    const apigeeAuth = await db.get_apigee_token();
+    const response = await fetch(product_URL, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apigeeAuth}`, "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+    });
+    return response.json();
 };
 
 const app_rate_subscription = async (req, res, next) => {
     const { app_id } = req.body;
     try {
         const { CstAppMast, CstCustomer, CstAppProduct, Product } = getModels();
-        let _app_id = app_id && validator.isNumeric(app_id.toString()) ? parseInt(app_id) : 0;
+        const _app_id = app_id && validator.isNumeric(app_id.toString()) ? parseInt(app_id) : 0;
 
         const appData = await CstAppMast.findOne({
             where: { app_id: _app_id, is_deleted: false },
-            include: [{
-                model: CstCustomer,
-                as: 'customer',
-                where: { is_deleted: false },
-                attributes: ['email_id', 'developer_id']
-            }],
-            attributes: ['customer_id', 'app_name', 'description', 'expected_volume', 'callback_url', 'ip_addresses', 'cert_public_key', 'app_id', 'in_live_env', 'is_approved', 'is_rejected', 'mkr_is_approved', 'mkr_is_rejected']
+            include: [{ model: CstCustomer, as: 'customer', where: { is_deleted: false }, attributes: ['email_id', 'developer_id'] }],
+            attributes: ['customer_id', 'app_name', 'app_id', 'in_live_env']
         });
 
         if (!appData) {
             return res.status(200).json(success(false, res.statusCode, "App details not found.", null));
         }
 
-        // Get products for the app
-        const appProducts = await CstAppProduct.findAll({
-            where: { app_id: _app_id },
-            include: [{
-                model: Product,
-                as: 'product',
-                attributes: ['product_id', 'product_name'],
-                required: true
-            }]
-        });
-        const products = appProducts?.map(ap => ap.product.product_name) || [];
-
         const developer_id = appData.customer?.developer_id;
         const email_id = appData.customer?.email_id;
-        if (developer_id && developer_id.length > 0 && email_id.length > 0) {
-            for (const element of products) {
-                const data = { apiproduct: element };
-                console.log("======productsdata======", data);
-                const product_URL = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/developers/${email_id}/subscriptions`;
-                const apigeeAuth = await db.get_apigee_token();
-                const response = await fetch(product_URL, {
-                    method: "POST",
-                    headers: { Authorization: `Bearer ${apigeeAuth}`, "Content-Type": "application/json", },
-                    body: JSON.stringify(data),
-                });
-                const responseData = await response.json();
-                const subscriptions_response = JSON.stringify(response);
-                if (responseData?.appId) {
-                    console.log("========subscriptions_response=========", subscriptions_response);
-                }
-                else if (
-                    (responseData?.error?.status?.toUpperCase() === 'ABORTED' && String(responseData?.error?.code) === '409') ||
-                    responseData?.error?.message?.length > 0
-                ) {
-                    console.log("========apigee_error_response=========", responseData?.error?.message ?? 'Unknown error');
-                }
-            }
-            return res.status(200).json(success(true, res.statusCode, "product subscriptions successfully.", null));
-        } else {
+
+        if (!developer_id || !email_id) {
             return res.status(200).json(success(false, res.statusCode, "Apigee response : Developer id not found", null));
         }
+
+        const appProducts = await CstAppProduct.findAll({
+            where: { app_id: _app_id },
+            include: [{ model: Product, as: 'product', attributes: ['product_id', 'product_name'], required: true }]
+        });
+        const products = appProducts.map(ap => ap.product.product_name);
+
+        for (const productName of products) {
+            const responseData = await subscribeProductToApigee(email_id, productName);
+            if (responseData?.error?.message) {
+                _logger.error(`Subscription error for ${productName}: ${responseData.error.message}`);
+            }
+        }
+
+        return res.status(200).json(success(true, res.statusCode, "product subscriptions successfully.", null));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
     }
 };
 
+// Helper: Update monetization rate in Apigee
+const updateMonetizationRateInApigee = async (email_id, app_name, isCurrentlyApplicable) => {
+    const value_data = isCurrentlyApplicable ? "False" : "";
+    const jsondata = { name: "is_monetization_active", value: value_data };
+    const data = { attribute: jsondata };
+    const product_URL = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/developers/${email_id}/apps/${app_name}/attributes`;
+    const apigeeAuth = await db.get_apigee_token();
+    const response = await fetch(product_URL, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apigeeAuth}`, "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+    });
+    return { response, data: await response.json() };
+};
+
+// Helper: Log monetization rate toggle
+const logMonetizationRateToggle = (tokenData, appInfo, appId) => {
+    try {
+        const data_to_log = {
+            correlation_id: correlator.getId(),
+            token_id: tokenData.token_id,
+            account_id: tokenData.account_id,
+            user_type: 1,
+            user_id: tokenData.admin_id,
+            narration: `App monetization status updated. Customer email = ${appInfo.email_id}, App name = ${appInfo.app_name}`,
+            query: `CstAppMast.update({ is_monetization_rate_appliacable: ... }, { where: { app_id: ${appId} }})`,
+        };
+        action_logger.info(JSON.stringify(data_to_log));
+    } catch (_) { /* ignore logging errors */ }
+};
+
 const app_monitization_toggle_uat_prod = async (req, res, next) => {
     const { app_id } = req.body;
     try {
         const { CstAppMast, CstCustomer } = getModels();
-        let _app_id = app_id && validator.isNumeric(app_id.toString()) ? parseInt(app_id) : 0;
+        const _app_id = app_id && validator.isNumeric(app_id.toString()) ? parseInt(app_id) : 0;
 
         const appData = await CstAppMast.findOne({
             where: { app_id: _app_id, is_deleted: false },
-            include: [{
-                model: CstCustomer,
-                as: 'customer',
-                where: { is_deleted: false },
-                attributes: ['email_id', 'developer_id']
-            }],
+            include: [{ model: CstCustomer, as: 'customer', where: { is_deleted: false }, attributes: ['email_id', 'developer_id'] }],
             attributes: ['customer_id', 'app_name', 'is_monetization_rate_appliacable', 'apigee_app_id', 'app_id', 'in_live_env', 'is_approved']
         });
 
@@ -1593,62 +1602,36 @@ const app_monitization_toggle_uat_prod = async (req, res, next) => {
             return res.status(200).json(success(false, res.statusCode, "App details not found.", null));
         }
 
-        const row1 = [{
-            customer_id: appData.customer_id,
-            app_name: appData.app_name,
-            is_monetization_rate_appliacable: appData.is_monetization_rate_appliacable,
-            apigee_app_id: appData.apigee_app_id,
-            app_id: appData.app_id,
-            in_live_env: appData.in_live_env,
-            is_approved: appData.is_approved,
-            email_id: appData.customer?.email_id,
-            developer_id: appData.customer?.developer_id
-        }];
-
-        if (!row1[0].apigee_app_id) {
+        if (!appData.apigee_app_id) {
             return res.status(200).json(success(false, res.statusCode, "Apigee App Id not found.", null));
         }
-        const app_name = row1[0].app_name;
-        const developer_id = row1[0].developer_id;
-        const email_id = row1[0].email_id;
-        if (developer_id && developer_id.length > 0 && email_id.length > 0 && app_name) {
-            try {
-                let value_data = row1[0].is_monetization_rate_appliacable && row1[0].is_monetization_rate_appliacable == true ? "False" : "";
-                let jsondata = { name: "is_monetization_active", value: value_data };
-                const data = { attribute: jsondata };
-                const product_URL = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/developers/${email_id}/apps/${app_name}/attributes`;
-                console.log("=====product_URL=======", product_URL);
-                const apigeeAuth = await db.get_apigee_token();
-                const response = await fetch(product_URL, {
-                    method: "POST",
-                    headers: { Authorization: `Bearer ${apigeeAuth}`, "Content-Type": "application/json", },
-                    body: JSON.stringify(data),
-                });
-                console.log("=====response=====", response);
-                const responseData = await response.json();
-                console.log("=======responseData==========", responseData);
-                if (response.ok && responseData) {
-                    const newRateApplicable = !row1[0].is_monetization_rate_appliacable;
-                    await CstAppMast.update(
-                        { is_monetization_rate_appliacable: newRateApplicable },
-                        { where: { app_id: _app_id } }
-                    );
-                }
-            } catch (_) { console.log("-------------", _); }
-            try {
-                let data_to_log = {
-                    correlation_id: correlator.getId(),
-                    token_id: req.token_data.token_id,
-                    account_id: req.token_data.account_id,
-                    user_type: 1,
-                    user_id: req.token_data.admin_id,
-                    narration: ' app monitazation status updated by . Customer email = ' + row1[0].email_id + ', App name = ' + row1[0].app_name,
-                    query: `CstAppMast.update({ is_monetization_rate_appliacable: ... }, { where: { app_id: ${_app_id} }})`,
-                }
-                action_logger.info(JSON.stringify(data_to_log));
-            } catch (_) { console.log("---catch----------", _); }
+
+        const appInfo = {
+            app_name: appData.app_name,
+            email_id: appData.customer?.email_id,
+            developer_id: appData.customer?.developer_id,
+            is_monetization_rate_appliacable: !!appData.is_monetization_rate_appliacable
+        };
+
+        if (!appInfo.developer_id || !appInfo.email_id || !appInfo.app_name) {
+            return res.status(200).json(success(false, res.statusCode, "Required data not found.", null));
         }
-        return res.status(200).json(success(true, res.statusCode, "App Monitazation Status Change successfully.", null));
+
+        try {
+            const { response, data: responseData } = await updateMonetizationRateInApigee(
+                appInfo.email_id, appInfo.app_name, appInfo.is_monetization_rate_appliacable
+            );
+
+            if (response.ok && responseData) {
+                const newRateApplicable = !appInfo.is_monetization_rate_appliacable;
+                await CstAppMast.update({ is_monetization_rate_appliacable: newRateApplicable }, { where: { app_id: _app_id } });
+            }
+        } catch (apiError) {
+            _logger.error('Monetization rate toggle error: ' + apiError.message);
+        }
+
+        logMonetizationRateToggle(req.token_data, appInfo, _app_id);
+        return res.status(200).json(success(true, res.statusCode, "App Monetization Status Change successfully.", null));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
