@@ -81,30 +81,6 @@ const createEmptyLogEntry = (seq_no, extraFields = {}) => ({
     ...extraFields
 });
 
-// Helper: Get user info by type and user_id
-const getUserInfoByUserId = async (userType, userId) => {
-    const { AdmUser, CstCustomer } = getModels();
-    let row = null;
-
-    if (userType === 1) {
-        row = await AdmUser.findOne({
-            where: { admin_id: userId },
-            attributes: ['first_name', 'last_name', 'email_id']
-        });
-    } else if (userType === 2) {
-        row = await CstCustomer.findOne({
-            where: { customer_id: userId },
-            attributes: ['first_name', 'last_name', 'email_id']
-        });
-    }
-
-    if (!row) return { full_name: '', email_id: '' };
-    return {
-        full_name: `${row.first_name || ''} ${row.last_name || ''}`.trim(),
-        email_id: row.email_id || ''
-    };
-};
-
 // Helper: Fetch API history by correlation ID
 const fetchApiHistory = async (collection, correlationId) => {
     if (!correlationId) return {};
@@ -122,7 +98,7 @@ const processUserLogDocument = async (item, index, pageNo, pageSize, apiCollecti
         return createEmptyLogEntry(seq_no, { narration: '' });
     }
 
-    const userInfo = await getUserInfoByUserId(log_object.user_type, log_object.user_id);
+    const userInfo = await getUserInfo(log_object.user_type, log_object.user_id);
     const apiHistory = await fetchApiHistory(apiCollection, log_object.correlation_id);
 
     return {

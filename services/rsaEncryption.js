@@ -36,7 +36,7 @@ const getPrivateKey = () => {
     let key = process.env.privateKey || process.env.RSA_PRIVATE_KEY;
 
     // If key is truncated (dotenv multiline issue), load from file
-    if (!key || !key.includes('-----END')) {
+    if (!key?.includes('-----END')) {
         loadKeysFromEnvFile();
         key = cachedPrivateKey;
     }
@@ -52,7 +52,7 @@ const getPublicKey = () => {
     let key = process.env.publicKey || process.env.RSA_PUBLIC_KEY;
 
     // If key is truncated (dotenv multiline issue), load from file
-    if (!key || !key.includes('-----END')) {
+    if (!key?.includes('-----END')) {
         loadKeysFromEnvFile();
         key = cachedPublicKey;
     }

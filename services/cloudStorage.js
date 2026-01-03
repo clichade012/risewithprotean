@@ -16,7 +16,7 @@ const UploadFile = async (filePath, destFileName, is_public = false) => {
         preconditionOpts: { ifGenerationMatch: 0 },
     };
     const [, resp] = await bucket.upload(filePath, options);
-    if (resp && is_public == true) {
+    if (resp && is_public) {
         try {
             await bucket.file(destFileName).makePublic();
         } catch (err) {
@@ -51,11 +51,10 @@ const MoveFile = async (filePath, destFileName) => {
 }
 
 const Download = async (filePath, destFileName) => {
-    const gcs = new Storage({ keyFilename: path.join(__dirname, '../oauth2.keys.json'), });
-    const storage = new Storage();
-    const bucket = gcs.bucket(process.env.GCP_STORAGE_BUCKET);
+    const storage = new Storage({ keyFilename: path.join(__dirname, '../oauth2.keys.json'), });
+    const bucket = storage.bucket(process.env.GCP_STORAGE_BUCKET);
     const options = { preconditionOpts: { ifGenerationMatch: 0 }, };
-    const [contents] = await storage.bucket(process.env.GCP_STORAGE_BUCKET).file(filePath).download(options);
+    const [contents] = await bucket.file(filePath).download(options);
     return contents;
 }
 

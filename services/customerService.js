@@ -1050,57 +1050,58 @@ const parseIpAddresses = (ip_addresses) => {
     return { validIps };
 };
 
+// Helper to validate app creation/update common fields
+const validateAppFields = async (req, existingAppId = null) => {
+    const { app_name, product_ids, expected_volume, callback_url, ip_addresses } = req.body;
+    const { CstAppMast } = getModels();
+
+    const appNameResult = validateAppName(app_name);
+    if (appNameResult.error) return { error: appNameResult.error };
+    const _app_name = appNameResult._app_name;
+
+    const whereClause = { customer_id: req.token_data.customer_id, is_deleted: false, app_name: 'uat_' + _app_name };
+    if (existingAppId) whereClause.app_id = { [Op.ne]: existingAppId };
+
+    const existingApp = await CstAppMast.findOne({ attributes: ['app_id'], where: whereClause });
+    if (existingApp) return { error: "App name already exist." };
+
+    const liveWhereClause = { customer_id: req.token_data.customer_id, is_deleted: false, app_name: _app_name, is_live_app_created: true };
+    if (existingAppId) liveWhereClause.app_id = { [Op.ne]: existingAppId };
+
+    const existingLiveApp = await CstAppMast.findOne({ attributes: ['app_id'], where: liveWhereClause });
+    if (existingLiveApp) return { error: "App name already exist in production." };
+
+    const prodIds = parseProductIds(product_ids);
+    if (prodIds.length <= 0) return { error: "Please select api product." };
+
+    if (!expected_volume || !validator.isNumeric(expected_volume.toString()) || expected_volume <= 0) {
+        return { error: "Please enter expected traffic." };
+    }
+
+    if (callback_url?.length && !db.isValidURL(callback_url)) {
+        return { error: "Please enter valid callback url." };
+    }
+
+    const ipResult = parseIpAddresses(ip_addresses);
+    if (ipResult.error) return { error: ipResult.error };
+
+    return { _app_name, prodIds, ipAddress: ipResult.validIps };
+};
+
 const app_new = async (req, res, next) => {
-    const { app_name, product_ids, description, expected_volume, callback_url, ip_addresses } = req.body;
+    const { description, expected_volume, callback_url } = req.body;
     try {
-        const appNameResult = validateAppName(app_name);
-        if (appNameResult.error) {
-            return res.status(200).json(success(false, res.statusCode, appNameResult.error, null));
+        const validation = await validateAppFields(req);
+        if (validation.error) {
+            return res.status(200).json(success(false, res.statusCode, validation.error, null));
         }
-        const _app_name = appNameResult._app_name;
-
-        const { CstAppMast } = getModels();
-
-        const existingApp = await CstAppMast.findOne({
-            attributes: ['app_id', 'app_name'],
-            where: { customer_id: req.token_data.customer_id, is_deleted: false, app_name: 'uat_' + _app_name }
-        });
-        if (existingApp) {
-            return res.status(200).json(success(false, res.statusCode, "App name already exist.", null));
-        }
-
-        const existingLiveApp = await CstAppMast.findOne({
-            attributes: ['app_id', 'app_name'],
-            where: { customer_id: req.token_data.customer_id, is_deleted: false, app_name: _app_name, is_live_app_created: true }
-        });
-        if (existingLiveApp) {
-            return res.status(200).json(success(false, res.statusCode, "App name already exist in production.", null));
-        }
-
-        const prodIds = parseProductIds(product_ids);
-        if (prodIds.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please select api product.", null));
-        }
+        const { _app_name, prodIds, ipAddress } = validation;
 
         const certResult = await processCertificate(req.files);
         if (certResult.error) {
             return res.status(200).json(success(false, res.statusCode, certResult.error, null));
         }
         const { certificateUrl: certificate, publicKeySingleLine } = certResult;
-
-        if (!expected_volume || !validator.isNumeric(expected_volume.toString()) || expected_volume <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter expected traffic.", null));
-        }
-
-        const ipResult = parseIpAddresses(ip_addresses);
-        if (ipResult.error) {
-            return res.status(200).json(success(false, res.statusCode, ipResult.error, null));
-        }
-        const ipAddress = ipResult.validIps;
-
-        if (callback_url?.length && !db.isValidURL(callback_url)) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter valid callback url.", null));
-        }
 
         const _description = description?.length ? description : '';
         const { CstCustomer, CstAppProduct } = getModels();
@@ -1321,36 +1322,14 @@ const processUpdateCertificate = async (files, existingCert, existingPubKey) => 
 };
 
 const app_update = async (req, res, next) => {
-    const { app_id, app_name, product_ids, description, expected_volume, callback_url, ip_addresses } = req.body;
+    const { app_id, description } = req.body;
     try {
         const _app_id = parseNumericId(app_id);
         if (_app_id <= 0) {
             return res.status(200).json(success(false, res.statusCode, "Incorrect app id.", null));
         }
 
-        const appNameResult = validateAppName(app_name);
-        if (appNameResult.error) {
-            return res.status(200).json(success(false, res.statusCode, appNameResult.error, null));
-        }
-        const _app_name = appNameResult._app_name;
-
         const { CstAppMast } = getModels();
-
-        const existingApp = await CstAppMast.findOne({
-            attributes: ['app_id', 'app_name', 'display_name'],
-            where: { customer_id: req.token_data.customer_id, is_deleted: false, app_name: 'uat_' + _app_name, app_id: { [Op.ne]: _app_id } }
-        });
-        if (existingApp) {
-            return res.status(200).json(success(false, res.statusCode, "App name already exist.", null));
-        }
-
-        const existingLiveApp = await CstAppMast.findOne({
-            attributes: ['app_id', 'app_name'],
-            where: { customer_id: req.token_data.customer_id, is_deleted: false, app_name: _app_name, app_id: { [Op.ne]: _app_id }, is_live_app_created: true }
-        });
-        if (existingLiveApp) {
-            return res.status(200).json(success(false, res.statusCode, "App name already exist in production.", null));
-        }
 
         const appStatus = await CstAppMast.findOne({
             attributes: ['app_id', 'is_approved', 'is_rejected'],
@@ -1361,24 +1340,11 @@ const app_update = async (req, res, next) => {
             return res.status(500).json(success(false, res.statusCode, editError, null));
         }
 
-        const prodIds = parseProductIds(product_ids);
-        if (prodIds.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please select api product.", null));
+        const validation = await validateAppFields(req, _app_id);
+        if (validation.error) {
+            return res.status(200).json(success(false, res.statusCode, validation.error, null));
         }
-
-        if (!expected_volume || !validator.isNumeric(expected_volume.toString()) || expected_volume <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter expected traffic.", null));
-        }
-
-        if (callback_url?.length && !db.isValidURL(callback_url)) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter valid callback url.", null));
-        }
-
-        const ipResult = parseIpAddresses(ip_addresses);
-        if (ipResult.error) {
-            return res.status(200).json(success(false, res.statusCode, ipResult.error, null));
-        }
-        const ipAddress = ipResult.validIps;
+        const { _app_name, prodIds, ipAddress } = validation;
 
         const appDetails = await CstAppMast.findOne({
             attributes: ['app_id', 'app_name', 'description', 'expected_volume', 'callback_url', 'ip_addresses', 'certificate_file', 'cert_public_key', 'in_live_env'],
@@ -2363,326 +2329,253 @@ const credit_details_export = async (req, res, next) => {
 const send_mail_existing_user_to_sandbox = async (customer_id) => {
     const { CstCustomer, EmailTemplate } = getModels();
 
-    const row4 = await CstCustomer.findOne({
+    const customerData = await CstCustomer.findOne({
         attributes: ['company_name', 'first_name', 'last_name', 'email_id', 'mobile_no', 'register_date', 'is_activated'],
         where: { customer_id: customer_id }
     });
-    if (row4) {
-        const rowT = await EmailTemplate.findOne({
-            attributes: ['subject', 'body_text', 'is_enabled'],
-            where: { template_id: EmailTemplates.UPGRATE_TO_SANDBOX.value }
-        });
-        if (rowT) {
-            if (rowT.is_enabled) {
-                let subject = rowT.subject && rowT.subject.length > 0 ? rowT.subject : "";
-                let body_text = rowT.body_text && rowT.body_text.length > 0 ? rowT.body_text : "";
+    if (!customerData) return 0; // Customer data not found
 
-                subject = subject.replaceAll(process.env.EMAIL_TAG_FIRST_NAME, row4.first_name);
-                subject = subject.replaceAll(process.env.EMAIL_TAG_LAST_NAME, row4.last_name);
-                subject = subject.replaceAll(process.env.EMAIL_TAG_EMAIL_ID, row4.email_id);
-                subject = subject.replaceAll(process.env.EMAIL_TAG_MOBILE_NO, row4.mobile_no);
-                subject = subject.replaceAll(process.env.SITE_URL_TAG, process.env.FRONT_SITE_URL);
+    const template = await EmailTemplate.findOne({
+        attributes: ['subject', 'body_text', 'is_enabled'],
+        where: { template_id: EmailTemplates.UPGRATE_TO_SANDBOX.value }
+    });
+    if (!template) return -3; // Template not found
+    if (!template.is_enabled) return -4; // Template is disabled
 
-                body_text = body_text.replaceAll(process.env.EMAIL_TAG_FIRST_NAME, row4.first_name);
-                body_text = body_text.replaceAll(process.env.EMAIL_TAG_LAST_NAME, row4.last_name);
-                body_text = body_text.replaceAll(process.env.EMAIL_TAG_EMAIL_ID, row4.email_id);
-                body_text = body_text.replaceAll(process.env.EMAIL_TAG_MOBILE_NO, row4.mobile_no);
-
-                body_text = body_text.replaceAll(process.env.SITE_URL_TAG, process.env.FRONT_SITE_URL);
-
-                let mailOptions = {
-                    from: process.env.EMAIL_CONFIG_SENDER, // sender address
-                    to: row4.email_id, // list of receivers
-                    subject: subject, // Subject line
-                    html: body_text, // html body
-                }
-                let is_success = false;
-                try {
-                    await emailTransporter.sendMail(mailOptions);
-                    is_success = true;
-                } catch (err) {
-                    _logger.error(err.stack);
-                }
-                if (is_success) {
-                    return 1; /* Send*/
-                } else {
-                    return 0; /* Sending fail*/
-                }
-            } else {
-                return -4;      /*Templete is disabled*/
-            }
-        } else {
-            return -3;      /*Templete not found*/
-        }
-    }
-    return 0;       /*Customer data not found*/
+    const { subject, body_text } = processCustomerEmailTemplate(template, customerData);
+    const is_success = await sendCustomerEmail(customerData.email_id, subject, body_text);
+    return is_success ? 1 : 0;
 }
 
+
+// Helper to calculate previous date for analytics
+const calculateAnalyticsDates = (from_date, upto_date) => {
+    const from_dateTime = '18:30:00.000 UTC';
+    const to_dateTime = '18:30:00.000 UTC';
+    let previousfrom_Date = '';
+    if (from_date) {
+        const date = new Date(from_date);
+        date.setDate(date.getDate() - 1);
+        previousfrom_Date = date.toISOString().split('T')[0];
+    }
+    return {
+        _from_date: previousfrom_Date + ' ' + from_dateTime,
+        _upto_date: upto_date + ' ' + to_dateTime
+    };
+};
+
+// Helper to get customer email by ID
+const getCustomerEmail = async (customer_id) => {
+    if (customer_id <= 0) return '';
+    const query = `SELECT email_id FROM cst_customer WHERE customer_id = ? AND is_deleted = false`;
+    const rows = await db.sequelize.query(query, { replacements: [customer_id], type: QueryTypes.SELECT });
+    return (rows && rows.length > 0) ? rows[0].email_id : '';
+};
+
+// Helper to build analytics query conditions
+const buildAnalyticsConditions = (params) => {
+    const { email_id, search_text, product_id, from_date, upto_date, _from_date, _upto_date } = params;
+    const conditions = [];
+    const replacements = {};
+
+    if (email_id?.length) {
+        conditions.push(` developer_email = :email_id`);
+        replacements.email_id = email_id;
+    }
+    if (search_text?.length) {
+        conditions.push(` request_path ILIKE :search_text`);
+        replacements.search_text = `%${search_text}%`;
+    }
+    if (product_id?.length) {
+        conditions.push(` api_product = :product_id `);
+        replacements.product_id = product_id;
+    }
+    if (from_date) {
+        conditions.push(` ax_created_time >= :from_date`);
+        replacements.from_date = _from_date;
+    }
+    if (upto_date) {
+        conditions.push(` ax_created_time <= :upto_date`);
+        replacements.upto_date = _upto_date;
+    }
+    return { conditions, replacements };
+};
+
+// Helper to format analytics report row
+const formatAnalyticsReportRow = (item) => ({
+    sr_no: item.sr_no,
+    id: item.id,
+    organization: item.organization,
+    environment: item.environment,
+    request_uri: item.request_uri,
+    response_status_code: item.response_status_code,
+    client_received_start_timestamp: item.client_received_start_timestamp,
+    client_received_end_timestamp: item.client_received_end_timestamp,
+    client_sent_start_timestamp: item.client_sent_start_timestamp,
+    client_sent_end_timestamp: item.client_sent_end_timestamp,
+    ist_client_received_start_timestamp: db.convertUTCtoIST(item.client_received_start_timestamp) || '',
+    ist_client_received_end_timestamp: db.convertUTCtoIST(item.client_received_end_timestamp) || '',
+    ist_client_sent_start_timestamp: db.convertUTCtoIST(item.client_sent_start_timestamp) || '',
+    ist_client_sent_end_timestamp: db.convertUTCtoIST(item.client_sent_end_timestamp) || '',
+    request_path: item.request_path,
+    developer: item.developer,
+    developer_app: item.developer_app,
+    api_product: item.api_product,
+    dc_api_request_id: item.dc_api_request_id,
+    dc_api_name: item.dc_api_name,
+    dc_case_id: item.dc_case_id,
+    total_response_time: item.total_response_time,
+    developer_email: item.developer_email,
+    ax_created_time: item.ax_created_time,
+    dc_api_product: item.dc_api_product,
+    dc_api_resource: item.dc_api_resource,
+    dc_developer_app: item.dc_developer_app,
+    dc_developer_app_display_name: item.dc_developer_app_display_name,
+    karza_status_code: item.karza_status_code || '',
+    response_description: item.response_description || '',
+    id_field_from_signzy_response: item.id_field_from_signzy_response || '',
+    x_apigee_mintng_price_multiplier: '',
+    x_apigee_mintng_rate: '',
+    rate_plan_rate: '',
+    billing_type: item.dc_billing_type,
+    dc_programid: item.dc_programid,
+});
 
 const analytics_reports_get = async (req, res, next) => {
     const { page_no, search_text, product_id, from_date, upto_date, type } = req.body;
     try {
-        let _customer_id = req.token_data.customer_id;
-        let _search_text = search_text && search_text.length > 0 ? search_text : "";
-        // let _product_id = product_id && validator.isNumeric(product_id.toString()) ? parseInt(product_id) : 0;
+        const _customer_id = req.token_data.customer_id;
+        const _search_text = search_text?.length ? search_text : "";
         let _page_no = page_no && validator.isNumeric(page_no.toString()) ? parseInt(page_no) : 0;
-        let _type = type && validator.isNumeric(type.toString()) ? parseInt(type) : 0;// 1 = prod and 2 = UAT
-        let total_record = 0;
-        let developerId = '';
-        let email_id = '';
-        let from_dateTime = '18:30:00.000 UTC';
-        let to_dateTime = '18:30:00.000 UTC';
-        let previousfrom_Date = '';
-        if (from_date) {
-            let date = new Date(from_date);
-            date.setDate(date.getDate() - 1);
-            previousfrom_Date = date.toISOString().split('T')[0];
-        }
+        let _type = type && validator.isNumeric(type.toString()) ? parseInt(type) : 0;
+        if (_page_no <= 0) _page_no = 1;
+        if (_type <= 0) _type = 1;
 
-        let _from_date = previousfrom_Date + ' ' + from_dateTime;
-        let _upto_date = upto_date + ' ' + to_dateTime;
-        let row2 = '';
-        if (_customer_id > 0) {
-            const _query2 = `SELECT customer_id,developer_id, first_name, last_name, email_id FROM cst_customer WHERE  customer_id = ? AND is_deleted = false`;
-            row2 = await db.sequelize.query(_query2, { replacements: [_customer_id], type: QueryTypes.SELECT, });
-            if (row2 || row2.length > 0) {
-                developerId = row2[0].developer_id;
-                email_id = row2[0].email_id;
-            }
-        }
-
-        if (_page_no <= 0) { _page_no = 1; } if (_type <= 0) { _type = 1; }
+        const { _from_date, _upto_date } = calculateAnalyticsDates(from_date, upto_date);
+        const email_id = await getCustomerEmail(_customer_id);
         const table_name = _type == 1 ? 'apigee_logs_prod' : 'apigee_logs';
-        let _query0 = `SELECT count(1) AS total_record FROM ${table_name} `;
-        const conditions0 = [];
-        const replacements0 = {};
 
-
-        // Add conditions based on provided letiables
-        if (_search_text && _search_text.length > 0) {
-            conditions0.push(` request_path ILIKE :search_text`);
-            replacements0.search_text = `%${_search_text}%`;
-        }
-        // if (developerId && developerId.length > 0) {
-        //     // conditions0.push(` REPLACE(developer, 'apigeeprotean@@@', '') = :developerId`);
-        //     conditions0.push(`developer_email = :'dhavan.k@phonepe.com'`);
-        //     replacements0.developerId = developerId;
-        //}
-
-        if (email_id && email_id.length > 0) {
-            conditions0.push(` developer_email = :email_id`);
-            replacements0.email_id = email_id;
-        }
-        if (product_id && product_id.length > 0) {
-            conditions0.push(` api_product = :product_id `);
-            replacements0.product_id = product_id;
-        }
-        if (from_date) {
-            conditions0.push(` ax_created_time >= :from_date`);
-            replacements0.from_date = _from_date;
-        }
-        if (upto_date) {
-            conditions0.push(` ax_created_time <= :upto_date`);
-            replacements0.upto_date = _upto_date;
-        }
-        if (conditions0.length > 0) {
-            _query0 += ' WHERE ' + conditions0.join(' AND ');
-        }
-
-        const row0 = await db.sequelize2.query(_query0, {
-            replacements: replacements0,
-            type: QueryTypes.SELECT
+        const { conditions, replacements } = buildAnalyticsConditions({
+            email_id, search_text: _search_text, product_id, from_date, upto_date, _from_date, _upto_date
         });
 
-        if (row0 && row0.length > 0) {
-            total_record = row0[0].total_record;
-        }
+        // Get total count
+        let countQuery = `SELECT count(1) AS total_record FROM ${table_name}`;
+        if (conditions.length > 0) countQuery += ' WHERE ' + conditions.join(' AND ');
+        const countResult = await db.sequelize2.query(countQuery, { replacements, type: QueryTypes.SELECT });
+        const total_record = countResult?.[0]?.total_record || 0;
 
-        let _query3 = `SELECT ROW_NUMBER() OVER(ORDER BY ax_created_time DESC) AS sr_no, 
+        // Get paginated data
+        let dataQuery = `SELECT ROW_NUMBER() OVER(ORDER BY ax_created_time DESC) AS sr_no,
         id, organization, environment, apiproxy, request_uri, proxy,request_path, proxy_basepath, request_verb, request_size, response_status_code,
-        is_error, client_received_start_timestamp, client_received_end_timestamp, target_sent_start_timestamp, target_sent_end_timestamp, 
-        target_received_start_timestamp, target_received_end_timestamp, client_sent_start_timestamp, client_sent_end_timestamp, client_ip, 
+        is_error, client_received_start_timestamp, client_received_end_timestamp, target_sent_start_timestamp, target_sent_end_timestamp,
+        target_received_start_timestamp, target_received_end_timestamp, client_sent_start_timestamp, client_sent_end_timestamp, client_ip,
         client_id, REPLACE(developer, 'apigeeprotean@@@', '') AS developer, developer_app, api_product, response_size, developer_email,
-        total_response_time, request_processing_latency, response_processing_latency,  ax_created_time,  dc_api_product, dc_api_resource, 
+        total_response_time, request_processing_latency, response_processing_latency, ax_created_time, dc_api_product, dc_api_resource,
         dc_developer_app, dc_developer_app_display_name, dc_developer_email, dc_api_name, dc_api_request_id, dc_case_id,
-        dc_karzastauscode AS karza_status_code,dc_backendstatusreason AS response_description,
+        dc_karzastauscode AS karza_status_code, dc_backendstatusreason AS response_description,
         dc_signzyresponseid AS id_field_from_signzy_response, x_apigee_mintng_price_multiplier, x_apigee_mintng_rate,
-	    x_apigee_mintng_rate::FLOAT /NULLIF(x_apigee_mintng_price_multiplier::FLOAT , 0) as rate_plan_rate, dc_billing_type, dc_programid FROM ${table_name}`;
-        const conditions = [];
-        const replacements = {
-            page_size: process.env.PAGINATION_SIZE,
-            page_no: _page_no,
-        };
+        x_apigee_mintng_rate::FLOAT /NULLIF(x_apigee_mintng_price_multiplier::FLOAT , 0) as rate_plan_rate, dc_billing_type, dc_programid FROM ${table_name}`;
+        if (conditions.length > 0) dataQuery += ' WHERE ' + conditions.join(' AND ');
+        dataQuery += ` ORDER BY ax_created_time DESC LIMIT :page_size OFFSET ((:page_no - 1) * :page_size)`;
 
-        // if (developerId && developerId.length > 0) {
-        //     // conditions.push(` REPLACE(developer, 'apigeeprotean@@@', '') = :developerId`);
-        //     conditions.push(`developer_email = : 'dhavan.k@phonepe.com'`);
-        //     replacements.developerId = developerId;
-        // }
+        const dataRows = await db.sequelize2.query(dataQuery, { replacements: paginatedReplacements, type: QueryTypes.SELECT });
 
-        if (email_id && email_id.length > 0) {
-            conditions.push(` developer_email = :email_id`);
-            replacements.email_id = email_id;
-        }
-        // Add conditions based on provided letiables
-        if (_search_text && _search_text.length > 0) {
-            conditions.push(` request_path ILIKE :search_text`);
-            replacements.search_text = `%${_search_text}%`;
-        }
-        if (product_id && product_id.length > 0) {
-            conditions.push(` api_product = :product_id `);
-            replacements.product_id = product_id;
-        }
-
-        if (from_date) {
-            conditions.push(` ax_created_time >= :from_date`);
-            replacements.from_date = _from_date;
-        }
-
-        if (upto_date) {
-            conditions.push(` ax_created_time <= :upto_date`);
-            replacements.upto_date = _upto_date;
-        }
-
-        if (conditions.length > 0) {
-            _query3 += ' WHERE ' + conditions.join(' AND ');
-        }
-        // Add LIMIT and OFFSET
-        _query3 += ` ORDER BY ax_created_time DESC LIMIT :page_size OFFSET ((:page_no - 1) * :page_size)`;
-
-
-        // Execute the query with replacements
-        const row3 = await db.sequelize2.query(_query3, {
-            replacements,
-            type: QueryTypes.SELECT
-        });
-
-        // const customerMap = row2.reduce((acc, customer) => {
-        //     acc[customer.developer_id] = `${customer.first_name} ${customer.last_name}`;
-        //     return acc;
-        // }, {});
-
-        if (row3 && row3.length > 0) {
-            let reports = [];
-            for (const item of row3) {
-                reports.push({
-                    sr_no: item.sr_no,
-                    id: item.id,
-                    // client_name: customerMap[item.developer] || null,
-                    organization: item.organization,
-                    environment: item.environment,
-                    request_uri: item.request_uri,
-                    response_status_code: item.response_status_code,
-                    client_received_start_timestamp: item.client_received_start_timestamp,
-                    client_received_end_timestamp: item.client_received_end_timestamp,
-                    client_sent_start_timestamp: item.client_sent_start_timestamp,
-                    client_sent_end_timestamp: item.client_sent_end_timestamp,
-
-                    ist_client_received_start_timestamp: db.convertUTCtoIST(item.client_received_start_timestamp) || '',
-                    ist_client_received_end_timestamp: db.convertUTCtoIST(item.client_received_end_timestamp) || '',
-                    ist_client_sent_start_timestamp: db.convertUTCtoIST(item.client_sent_start_timestamp) || '',
-                    ist_client_sent_end_timestamp: db.convertUTCtoIST(item.client_sent_end_timestamp) || '',
-                    request_path: item.request_path,
-                    developer: item.developer,
-                    developer_app: item.developer_app,
-                    api_product: item.api_product,
-                    dc_api_request_id: item.dc_api_request_id,
-                    dc_api_name: item.dc_api_name,
-                    dc_case_id: item.dc_case_id,
-                    total_response_time: item.total_response_time,
-                    developer_email: item.developer_email,
-                    ax_created_time: item.ax_created_time,
-                    dc_api_product: item.dc_api_product,
-                    dc_api_resource: item.dc_api_resource,
-                    dc_developer_app: item.dc_developer_app,
-                    dc_developer_app_display_name: item.dc_developer_app_display_name,
-                    karza_status_code: item.karza_status_code || '',
-                    response_description: item.response_description || '',
-                    id_field_from_signzy_response: item.id_field_from_signzy_response || '',
-                    x_apigee_mintng_price_multiplier: '',//item.x_apigee_mintng_price_multiplier,
-                    x_apigee_mintng_rate: '',//item.x_apigee_mintng_rate,
-                    rate_plan_rate: '',//item.rate_plan_rate,
-                    billing_type: item.dc_billing_type,
-                    dc_programid: item.dc_programid,
-                });
-            }
+        if (dataRows?.length > 0) {
+            const reports = dataRows.map(formatAnalyticsReportRow);
             const results = {
                 current_page: _page_no,
                 total_pages: Math.ceil(total_record / process.env.PAGINATION_SIZE),
                 total_record: total_record,
                 data: reports,
             };
-
             return res.status(200).json(success(true, res.statusCode, "Reports Data.", results));
-        } else {
-            const results = {
-                current_page: _page_no,
-                total_pages: '',
-                data: [],
-            };
-            return res.status(200).json(success(true, res.statusCode, "Unable to find reports detail, Please try again.", results));
         }
-
+        const results = { current_page: _page_no, total_pages: '', data: [] };
+        return res.status(200).json(success(true, res.statusCode, "Unable to find reports detail, Please try again.", results));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
     }
 };
 
+// Helper to build export query conditions
+const buildExportConditions = (params) => {
+    const { search_text, product_id, from_date, upto_date, _from_date, _upto_date } = params;
+    const conditions = [];
+    const replacements = {};
+
+    if (search_text?.length) {
+        conditions.push(`developer_email ILIKE :search_text`);
+        replacements.search_text = `%${search_text}%`;
+    }
+    if (product_id?.length) {
+        conditions.push(` dc_api_product ILIKE :product_id `);
+        replacements.product_id = `%${product_id}%`;
+    }
+    if (from_date) {
+        conditions.push(` ax_created_time >= :from_date`);
+        replacements.from_date = _from_date;
+    }
+    if (upto_date) {
+        conditions.push(` ax_created_time <= :upto_date`);
+        replacements.upto_date = _upto_date;
+    }
+    return { conditions, replacements };
+};
+
+// Helper to validate date range for analytics export
+const validateAnalyticsDateRange = (from_date, upto_date) => {
+    if (!from_date?.length || !validator.isDate(from_date)) {
+        return { error: "Please select a valid from date." };
+    }
+    if (!upto_date?.length || !validator.isDate(upto_date)) {
+        return { error: "Please select a valid upto date." };
+    }
+    const dateDifference = moment(upto_date).diff(moment(from_date), 'days');
+    if (dateDifference > 32) {
+        return { error: "Date range should not be greater than 31 days." };
+    }
+    return {};
+};
+
+// Helper to calculate dates with different time format for excel export
+const calculateExcelExportDates = (from_date, upto_date) => {
+    const from_dateTime = '18:30:00.000 UTC';
+    const to_dateTime = '18:29:59.999 UTC';
+    let previousfrom_Date = '';
+    if (from_date) {
+        const date = new Date(from_date);
+        date.setDate(date.getDate() - 1);
+        previousfrom_Date = date.toISOString().split('T')[0];
+    }
+    return {
+        _from_date: previousfrom_Date + ' ' + from_dateTime,
+        _upto_date: upto_date + ' ' + to_dateTime
+    };
+};
+
 const analytics_reports_export = async (req, res, next) => {
     const { page_no, search_text, product_id, from_date, upto_date, type } = req.body;
     try {
-        let _customer_id = req.token_data.customer_id;
-        let _search_text = search_text && search_text.length > 0 ? search_text : "";
+        const _customer_id = req.token_data.customer_id;
+        const _search_text = search_text?.length ? search_text : "";
         let _page_no = page_no && validator.isNumeric(page_no.toString()) ? parseInt(page_no) : 0;
-        let _type = type && validator.isNumeric(type.toString()) ? parseInt(type) : 0;// 1 = prod and 2 = UAT
-        let developerId = '';
-        let row2 = '';
-        if (_customer_id > 0) {
-            const _query2 = `SELECT customer_id, developer_id, first_name, last_name, email_id FROM cst_customer WHERE  customer_id = ? AND is_deleted = false`;
-            row2 = await db.sequelize.query(_query2, { replacements: [_customer_id], type: QueryTypes.SELECT, });
-            if (row2 || row2.length > 0) {
-                developerId = row2[0].developer_id;
-            }
-        }
+        let _type = type && validator.isNumeric(type.toString()) ? parseInt(type) : 0;
+        if (_page_no <= 0) _page_no = 1;
+        if (_type <= 0) _type = 1;
+
         if (_customer_id <= 0 || (product_id && product_id.length <= 0)) {
-
-            if (!from_date || from_date.length <= 0 || !validator.isDate(from_date)) {
-                return res.status(200).json(success(false, res.statusCode, "Please select a valid from date.", null));
-            }
-
-            if (!upto_date || upto_date.length <= 0 || !validator.isDate(upto_date)) {
-                return res.status(200).json(success(false, res.statusCode, "Please select a valid upto date.", null));
-            }
-
-
-            const fromDateMoment = moment(from_date);
-            const uptoDateMoment = moment(upto_date);
-            const dateDifference = uptoDateMoment.diff(fromDateMoment, 'days');
-
-            if (dateDifference > 32) {
-                return res.status(200).json({ success: false, message: "Date range should not be greater than 31 days." });
+            const dateValidation = validateAnalyticsDateRange(from_date, upto_date);
+            if (dateValidation.error) {
+                return res.status(200).json(success(false, res.statusCode, dateValidation.error, null));
             }
         }
-        console.log("------s-product_id-------------------", developerId);
-        let from_dateTime = '18:30:00.000 UTC';
-        let to_dateTime = '18:29:59.999 UTC';
 
-        if (from_date) {
-            let date = new Date(from_date);
-            date.setDate(date.getDate() - 1);
-            previousfrom_Date = date.toISOString().split('T')[0];
-        }
-
-        let _from_date = previousfrom_Date + ' ' + from_dateTime;
-        let _upto_date = upto_date + ' ' + to_dateTime;
-        let hasMoreData = true;
-        let currentPage = page_no && validator.isNumeric(page_no.toString()) ? parseInt(page_no) : 1;
-        const pageSize = 1000; // Set your desired page size
-
-        if (_page_no <= 0) { _page_no = 1; } if (_type <= 0) { _type = 1; }
+        const { _from_date, _upto_date } = calculateExcelExportDates(from_date, upto_date);
         const table_name = _type == 1 ? 'apigee_logs_prod' : 'apigee_logs';
-        console.log("------s-table_name-------------------", table_name);
+        let currentPage = page_no && validator.isNumeric(page_no.toString()) ? parseInt(page_no) : 1;
+        const pageSize = 1000;
 
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
         res.setHeader('Content-Disposition', 'attachment; filename="customer_analytics_reports_data.xlsx"');
@@ -2694,53 +2587,25 @@ const analytics_reports_export = async (req, res, next) => {
             'API Response Timestamp', 'API Request Timestamp (IST)', 'API Response Timestamp (IST)'];
         worksheet.addRow(headers).commit();
 
+        const { conditions, replacements: baseReplacements } = buildExportConditions({
+            search_text: _search_text, product_id, from_date, upto_date, _from_date, _upto_date
+        });
+
+        let hasMoreData = true;
         while (hasMoreData) {
-            let _query3 = `SELECT ROW_NUMBER() OVER(ORDER BY id DESC) AS sr_no, 
+            let _query3 = `SELECT ROW_NUMBER() OVER(ORDER BY id DESC) AS sr_no,
         id, organization, environment, apiproxy, request_uri, proxy, proxy_basepath,request_path, request_verb, request_size, response_status_code,
-        is_error, client_received_start_timestamp, client_received_end_timestamp, target_sent_start_timestamp, target_sent_end_timestamp, 
-        target_received_start_timestamp, target_received_end_timestamp, client_sent_start_timestamp, client_sent_end_timestamp, client_ip, 
+        is_error, client_received_start_timestamp, client_received_end_timestamp, target_sent_start_timestamp, target_sent_end_timestamp,
+        target_received_start_timestamp, target_received_end_timestamp, client_sent_start_timestamp, client_sent_end_timestamp, client_ip,
         client_id, REPLACE(developer, 'apigeeprotean@@@', '') AS developer, developer_app, api_product, response_size, developer_email,
-        total_response_time, request_processing_latency, response_processing_latency,  ax_created_time,  dc_api_product, dc_api_resource, 
-        dc_developer_app, dc_developer_app_display_name, dc_developer_email, dc_api_name, dc_api_request_id, dc_case_id ,
-        x_apigee_mintng_price_multiplier, x_apigee_mintng_rate, x_apigee_mintng_rate::FLOAT /NULLIF(x_apigee_mintng_price_multiplier::FLOAT , 0) as rate_plan_rate 
+        total_response_time, request_processing_latency, response_processing_latency, ax_created_time, dc_api_product, dc_api_resource,
+        dc_developer_app, dc_developer_app_display_name, dc_developer_email, dc_api_name, dc_api_request_id, dc_case_id,
+        x_apigee_mintng_price_multiplier, x_apigee_mintng_rate, x_apigee_mintng_rate::FLOAT /NULLIF(x_apigee_mintng_price_multiplier::FLOAT , 0) as rate_plan_rate
         FROM ${table_name} `;
-            const conditions = [];
-            const replacements = {
-                page_size: pageSize,
-                page_no: currentPage,
-            };
-            console.log("--------------------------", developerId);
-            if (developerId && developerId.length > 0) {
-                // conditions.push(` REPLACE(developer, 'apigeeprotean@@@', '') = :developerId`);
-                conditions.push(`developer_email = :'dhavan.k@phonepe.com'`);
-                replacements.developerId = developerId;
-            }
-            // Add conditions based on provided letiables
-            if (_search_text && _search_text.length > 0) {
-                conditions.push(`developer_email ILIKE :search_text`);
-                replacements.search_text = `%${_search_text}%`;
-            }
-            if (product_id && product_id.length > 0) {
-                conditions.push(` dc_api_product ILIKE :product_id `);
-                replacements.product_id = `%${product_id}%`;
-            }
-
-            if (from_date) {
-                conditions.push(` ax_created_time >= :from_date`);
-                replacements.from_date = _from_date;
-            }
-
-            if (upto_date) {
-                conditions.push(` ax_created_time <= :upto_date`);
-                replacements.upto_date = _upto_date;
-            }
-
-            if (conditions.length > 0) {
-                _query3 += ' WHERE ' + conditions.join(' AND ');
-            }
-            // Add LIMIT and OFFSET
+            if (conditions.length > 0) _query3 += ' WHERE ' + conditions.join(' AND ');
             _query3 += ` LIMIT :page_size OFFSET ((:page_no - 1) * :page_size)`;
 
+            const replacements = { ...baseReplacements, page_size: pageSize, page_no: currentPage };
             const pageData = await db.sequelize2.query(_query3, { replacements, type: QueryTypes.SELECT, raw: true });
             if (pageData && pageData.length > 0) {
                 pageData.forEach(row => {
@@ -2784,57 +2649,24 @@ const analytics_reports_export = async (req, res, next) => {
 };
 
 const cst_analytics_reports_generate_excel = async (req, res, next) => {
-    const { page_no, search_text, product_id, from_date, upto_date, type } = req.body;
+    const { page_no, from_date, upto_date, type } = req.body;
     try {
-        let _customer_id = req.token_data.customer_id;
-        let _search_text = search_text && search_text.length > 0 ? search_text : "";
+        const _customer_id = req.token_data.customer_id;
         let _page_no = page_no && validator.isNumeric(page_no.toString()) ? parseInt(page_no) : 0;
-        let _type = type && validator.isNumeric(type.toString()) ? parseInt(type) : 0;// 1 = prod and 2 = UAT
-        let developerId = '';
-        let email_id = '';
-        let row2 = '';
+        let _type = type && validator.isNumeric(type.toString()) ? parseInt(type) : 0;
+        if (_page_no <= 0) _page_no = 1;
+        if (_type <= 0) _type = 1;
+
+        const email_id = await getCustomerEmail(_customer_id);
+
         if (_customer_id > 0) {
-            const _query2 = `SELECT customer_id, developer_id, first_name, last_name, email_id FROM cst_customer WHERE  customer_id = ? AND is_deleted = false`;
-            row2 = await db.sequelize.query(_query2, { replacements: [_customer_id], type: QueryTypes.SELECT, });
-            if (row2 || row2.length > 0) {
-                developerId = row2[0].developer_id;
-                email_id = row2[0].email_id;
-            }
-        }
-        if (_customer_id > 0) {
-
-            if (!from_date || from_date.length <= 0 || !validator.isDate(from_date)) {
-                return res.status(200).json(success(false, res.statusCode, "Please select a valid from date.", null));
-            }
-
-            if (!upto_date || upto_date.length <= 0 || !validator.isDate(upto_date)) {
-                return res.status(200).json(success(false, res.statusCode, "Please select a valid upto date.", null));
-            }
-
-
-            const fromDateMoment = moment(from_date);
-            const uptoDateMoment = moment(upto_date);
-            const dateDifference = uptoDateMoment.diff(fromDateMoment, 'days');
-
-            if (dateDifference > 32) {
-                return res.status(200).json({ success: false, message: "Date range should not be greater than 31 days." });
+            const dateValidation = validateAnalyticsDateRange(from_date, upto_date);
+            if (dateValidation.error) {
+                return res.status(200).json(success(false, res.statusCode, dateValidation.error, null));
             }
         }
 
-        let previousfrom_Date;
-        console.log("------s-product_id-------------------", developerId);
-        let from_dateTime = '18:30:00.000 UTC';
-        let to_dateTime = '18:29:59.999 UTC';
-
-        if (from_date) {
-            let date = new Date(from_date);
-            date.setDate(date.getDate() - 1);
-            previousfrom_Date = date.toISOString().split('T')[0];
-        }
-
-        let _from_date = previousfrom_Date + ' ' + from_dateTime;
-        let _upto_date = upto_date + ' ' + to_dateTime;
-        if (_page_no <= 0) { _page_no = 1; } if (_type <= 0) { _type = 1; }
+        const { _from_date, _upto_date } = calculateExcelExportDates(from_date, upto_date);
         const table_name = _type == 1 ? 'apigee_logs_prod' : 'apigee_logs';
         console.log("------s-table_name-------------------", table_name);
         const uuid = uuidv4();
@@ -2868,7 +2700,7 @@ const cst_analytics_reports_generate_excel = async (req, res, next) => {
         await fs.ensureDir(path.join(__dirname, '../../../uploads/download_excel'));
 
         console.log("==============filePath=======================", filePath);
-        generateExcelFile(req, filePath, requestId, _type, developerId, _from_date, _upto_date, email_id);
+        generateExcelFile(req, filePath, requestId, _type, _from_date, _upto_date, email_id);
         let data = {
             request_id: requestId
         }
@@ -2881,10 +2713,9 @@ const cst_analytics_reports_generate_excel = async (req, res, next) => {
     }
 };
 
-const generateExcelFile = async (req, filePath, requestId, _type, developerId, _from_date, _upto_date, email_id) => {
-    const { customer_id, search_text, product_id, from_date, upto_date } = req.body;
+const generateExcelFile = async (req, filePath, requestId, _type, _from_date, _upto_date, email_id) => {
+    const { search_text, product_id, from_date, upto_date } = req.body;
     try {
-        let _customer_id = customer_id && validator.isNumeric(customer_id.toString()) ? parseInt(customer_id) : 0;
         let _search_text = search_text && search_text.length > 0 ? search_text : "";
         let _email_id = email_id && email_id.length > 0 ? email_id : "";
         const workbook = new excel.stream.xlsx.WorkbookWriter({ filename: filePath });
@@ -3059,175 +2890,210 @@ const cst_analytics_reports_download = async (req, res, next) => {
     }
 };
 
+// Helper to check for recent payment in Redis
+const checkRecentPayment = async (customer_id) => {
+    if (process.env.REDIS_ENABLED > 0) {
+        try {
+            const paymentStatus = await redisDB.get(`payment:${customer_id}`);
+            return paymentStatus === 'success';
+        } catch (error) {
+            console.log("===========rediserror==========", error);
+        }
+    }
+    return false;
+};
+
+// Helper to validate payment amount
+const validatePaymentAmount = (total_amount) => {
+    if (!total_amount || !validator.isNumeric(total_amount.toString())) return 0;
+    return parseFloat(parseFloat(total_amount).toFixed(2));
+};
+
+// Helper to build payment device object
+const buildPaymentDeviceObject = (params) => {
+    const { user_agent, browser_language, browser_javascript_enabled, browser_tz,
+        browser_color_depth, browser_java_enabled, browser_screen_height, browser_screen_width, ip } = params;
+    const jsEnabled = browser_javascript_enabled?.toString().toLowerCase() === 'true';
+    const deviceObj = {
+        accept_header: 'text/html', init_channel: 'internet', ip,
+        user_agent, browser_language, browser_javascript_enabled: jsEnabled,
+    };
+    if (jsEnabled) {
+        Object.assign(deviceObj, { browser_tz, browser_color_depth, browser_java_enabled, browser_screen_height, browser_screen_width });
+    }
+    return deviceObj;
+};
+
+// Helper to extract auth token from payment payload
+const extractAuthToken = (payloadData) => {
+    for (const element of payloadData.links || []) {
+        if (element.rel === payloadData.next_step) {
+            return element.headers.authorization;
+        }
+    }
+    return '';
+};
+
+// Helper to insert payment record
+const insertPaymentRecord = async (params) => {
+    const { payloadData, correlationId, customer_id, currDate, _total_amount, account_id, order_id,
+        curr_order_date, ip, _traceid, _timestamp, payment_raw_object, req_signature, success_text, success_data } = params;
+    const query = `INSERT INTO cst_wallets_payment(gateway_order_id, correlation_id, wallet_id, customer_id, payment_date, total_amount,
+        net_amount, added_by, order_id, order_date, ip_address, bd_traceid, bd_timestamp, create_order_payload_object, create_order_payload_signature,
+        create_order_resp_signature, create_order_resp_object, is_pg_payment, form_order_no, form_order_date, form_invoice_no, form_invoice_date)
+        VALUES( ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, true, ?, ?, ?, ?) RETURNING "payment_id", "unique_id"`;
+    const replacements = [payloadData.bdorderid, correlationId, 0, customer_id, currDate, _total_amount,
+        _total_amount, account_id, order_id, curr_order_date, ip, _traceid, _timestamp, payment_raw_object,
+        req_signature, success_text, JSON.stringify(success_data), 0, currDate, '', currDate];
+    const [rowPayIn] = await db.sequelize.query(query, { replacements, returning: true });
+    return {
+        payment_id: rowPayIn?.[0]?.payment_id || 0,
+        unique_id: rowPayIn?.[0]?.unique_id || 0
+    };
+};
+
+// Helper to build flow config for successful payment
+const buildPaymentFlowConfig = (payloadData, authToken, unique_id) => ({
+    merchantLogo: process.env.MERCHANT_LOGO,
+    merchantId: payloadData.mercid,
+    bdOrderId: payloadData.bdorderid,
+    authToken,
+    childWindow: true,
+    returnUrl: "",
+    retryCount: Constants.proj_payment_retry_count,
+    prefs: billDeskModule.preferences,
+    netBanking: billDeskModule.net_banking,
+    payment_id: unique_id,
+});
+
+// Helper to process successful payment response
+const processPaymentSuccess = async (kvm_response, context) => {
+    const { _traceid, _timestamp, order_id, payment_raw_object, req_signature, ip, req } = context;
+    const success_text = await kvm_response.text();
+    const is_verified = jws.verify(success_text, "HS256", process.env.BILL_DESK_SECRETKEY);
+    if (!is_verified) return { error: 'Payment gateway response verification failed.' };
+
+    const success_data = jws.decode(success_text);
+    if (!success_data) return { error: 'Payment gateway response decoding failed.' };
+
+    const payloadData = JSON.parse(success_data.payload);
+    const authToken = extractAuthToken(payloadData);
+    const currDate = new Date();
+    const curr_order_date = dateFormat(Constants.payment_api_order_date_format, currDate);
+
+    const { payment_id, unique_id } = await insertPaymentRecord({
+        payloadData, correlationId: correlator.getId(), customer_id: req.token_data.customer_id,
+        currDate, _total_amount: context._total_amount, account_id: req.token_data.account_id,
+        order_id, curr_order_date, ip, _traceid, _timestamp, payment_raw_object, req_signature, success_text, success_data
+    });
+
+    if (payment_id <= 0) return { error: 'Unable to add record, Please try again.' };
+
+    paymentService.log_bill_desk_payment('info', ip, 'Order created and it will be send for payment.', {
+        traceid: _traceid, timestamp: _timestamp, order_id, payload: payment_raw_object, signature: req_signature
+    });
+
+    return { flow_config: buildPaymentFlowConfig(payloadData, authToken, unique_id) };
+};
+
+// Helper to process payment error response
+const processPaymentError = async (kvm_response, context) => {
+    const { _traceid, _timestamp, order_id, payment_raw_object, req_signature, ip } = context;
+    let error_msg = '', tmpBody = null, tmpRspPayload = null;
+
+    try {
+        const error_text = await kvm_response.text();
+        tmpBody = error_text;
+        const is_verified = jws.verify(error_text, "HS256", process.env.BILL_DESK_SECRETKEY);
+        if (is_verified) {
+            const error_data = jws.decode(error_text);
+            if (error_data) {
+                const payloadData = JSON.parse(error_data.payload);
+                tmpRspPayload = payloadData;
+                error_msg = payloadData?.message?.length > 0 ? payloadData.message : '';
+            }
+        }
+    } catch (_) { }
+
+    if (!error_msg.length) error_msg = kvm_response.statusText;
+
+    const rspHeadersValues = {};
+    if (kvm_response.headers) {
+        for (const [rhKey, rhValue] of kvm_response.headers.entries()) { rspHeadersValues[rhKey] = rhValue; }
+    }
+
+    paymentService.log_bill_desk_payment('error', ip, 'Create order gateway error: ' + error_msg, {
+        traceid: _traceid, timestamp: _timestamp, order_id, payload: payment_raw_object, signature: req_signature,
+        resp_hdeader: rspHeadersValues, resp_err: error_msg, resp_text: tmpBody,
+        status_code: kvm_response.status, resp_payload: tmpRspPayload
+    });
+
+    return error_msg;
+};
+
 const wallet_balance_pay_get = async (req, res, next) => {
     const { total_amount, user_agent, browser_language, browser_javascript_enabled, browser_tz,
-        browser_color_depth, browser_java_enabled, browser_screen_height, browser_screen_width, } = req.body;
+        browser_color_depth, browser_java_enabled, browser_screen_height, browser_screen_width } = req.body;
     try {
         const { CstCustomer } = getModels();
-
         const row = await CstCustomer.findOne({
             attributes: ['customer_id', 'developer_id', 'email_id', 'is_enabled'],
             where: { customer_id: req.token_data.customer_id, is_deleted: false }
         });
-        if (row) {
-            const _user_agent = (user_agent != null && user_agent.length > 0) ? user_agent : "";
-            const _total_amount = total_amount != null && validator.isNumeric(total_amount.toString()) ? parseFloat(parseFloat(total_amount).toFixed(2)) : 0;
-            if (_total_amount <= 0) {
-                return res.status(200).json(success(false, res.statusCode, 'Please enter wallet balance amount.', null));
-            }
-            try {
-                if (process.env.REDIS_ENABLED > 0) {
-                    const paymentStatus = await redisDB.get(`payment:${req.token_data.customer_id}`);
-                    if (paymentStatus === 'success') {
-                        return res.status(200).json(success(false, res.statusCode, 'A recent payment was made. Please wait 5 minutes before trying again.', null));
-                    }
-                }
-            } catch (error) {
-                console.log("===========rediserror==========", error);
-
-            }
-
-            if (_user_agent.toLowerCase().trim() != req.headers['user-agent'].toLowerCase().trim()) {
-                return res.status(200).json(success(false, res.statusCode, 'browser user agent does not matched.', null));
-            }
-
-            const temp_id = await commonModule.payment_order_id_new(); const currDate = new Date();
-            if (temp_id.length <= 0) {
-                return res.status(200).json(success(false, res.statusCode, 'Unable to create order id, Please try again.', null));
-            }
-
-            const order_id = Constants.proj_payment_order_id_int_prefix + temp_id.toString();
-            const curr_order_date = dateFormat(Constants.payment_api_order_date_format, currDate);
-            let ip = ''; try { const clientIp = requestIp.getClientIp(req); ip = clientIp; } catch { }
-            const _traceid = crypto.randomUUID().toString().replaceAll('-', ''); const _timestamp = currDate.getTime().toString();
-            const _browser_javascript_enabled = browser_javascript_enabled && browser_javascript_enabled.toString().toLowerCase() == 'true' ? true : false;
-
-            let deviceObj = {
-                accept_header: 'text/html', init_channel: 'internet', ip: ip,
-                user_agent: user_agent, browser_language: browser_language,
-                browser_javascript_enabled: _browser_javascript_enabled,
-            }
-            if (_browser_javascript_enabled) {
-                deviceObj['browser_tz'] = browser_tz;
-                deviceObj['browser_color_depth'] = browser_color_depth;
-                deviceObj['browser_java_enabled'] = browser_java_enabled;
-                deviceObj['browser_screen_height'] = browser_screen_height;
-                deviceObj['browser_screen_width'] = browser_screen_width;
-            }
-            console.log(process.env.APIS_BASE_URL);
-
-            const returnUrl = `${process.env.APIS_BASE_URL}customer/bill_desk_response`;
-            console.log("================returnUrl==============", returnUrl);
-            const payment_raw_object = JSON.stringify({
-                orderid: order_id,
-                mercid: process.env.BILL_DESK_MERCID,
-                order_date: curr_order_date,
-                amount: _total_amount,
-                currency: '356',
-                ru: returnUrl,
-                itemcode: 'DIRECT',
-                device: deviceObj,
-            });
-
-            console.log("================payment_raw_object================", payment_raw_object);
-
-            const req_signature = billDeskModule.jws_hmac(payment_raw_object);
-
-            const kvm_response = await billDeskModule.create_order(payment_raw_object, req_signature, _traceid, _timestamp);
-            console.log("================kvm_response==============", kvm_response);
-
-            if (kvm_response.status == 200) {
-                const success_text = await kvm_response.text();
-                const is_verified = jws.verify(success_text, "HS256", process.env.BILL_DESK_SECRETKEY);
-                if (is_verified) {
-                    const success_data = jws.decode(success_text);
-                    if (success_data != null) {
-                        const payloadData = JSON.parse(success_data.payload);
-                        let _authToken = '';
-                        for (const element of payloadData.links) {
-                            if (element.rel == payloadData.next_step) {
-                                _authToken = element.headers.authorization;
-                            }
-                        }
-
-                        const _queryPayIn = `INSERT INTO cst_wallets_payment(gateway_order_id, correlation_id, wallet_id, customer_id, payment_date, total_amount,
-                                        net_amount, added_by, order_id, order_date, ip_address, bd_traceid, bd_timestamp, create_order_payload_object, create_order_payload_signature, 
-                                        create_order_resp_signature, create_order_resp_object, is_pg_payment, form_order_no, form_order_date, form_invoice_no, form_invoice_date)
-                                        VALUES( ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, true, ?, ?, ?, ?) RETURNING "payment_id", "unique_id"`;
-                        const _replPayIn = [payloadData.bdorderid, correlator.getId(), 0, req.token_data.customer_id, currDate, _total_amount,
-                            _total_amount, req.token_data.account_id, order_id, curr_order_date, ip, _traceid, _timestamp, payment_raw_object,
-                            req_signature, success_text, JSON.stringify(success_data), 0, currDate, '', currDate];
-                        const [rowPayIn] = await db.sequelize.query(_queryPayIn, { replacements: _replPayIn, returning: true });
-                        const _new_pay_id = (rowPayIn && rowPayIn.length > 0 && rowPayIn[0] ? rowPayIn[0].payment_id : 0);
-                        const _new_unique_id = (rowPayIn && rowPayIn.length > 0 && rowPayIn[0] ? rowPayIn[0].unique_id : 0);
-                        if (_new_pay_id > 0) {
-                            let flow_config = {
-                                merchantLogo: process.env.MERCHANT_LOGO,
-                                merchantId: payloadData.mercid,
-                                bdOrderId: payloadData.bdorderid,
-                                authToken: _authToken,
-                                childWindow: true,
-                                returnUrl: "",
-                                retryCount: Constants.proj_payment_retry_count,
-                                prefs: billDeskModule.preferences,
-                                netBanking: billDeskModule.net_banking,
-                                payment_id: _new_unique_id,
-                            };
-
-                            const logData = {
-                                traceid: _traceid, timestamp: _timestamp, order_id: order_id, payload: payment_raw_object, signature: req_signature,
-                            };
-                            paymentService.log_bill_desk_payment('info', ip, 'Order created and it will be send for payment.', logData);
-
-                            return res.status(200).json(success(true, res.statusCode, '', flow_config));
-                        } else {
-                            return res.status(200).json(success(false, res.statusCode, 'Unable to add record, Please try again.', null));
-                        }
-                    } else {
-                        return res.status(200).json(success(false, res.statusCode, 'Payment gateway response decoding failed.', null));
-                    }
-                } else {
-                    return res.status(200).json(success(false, res.statusCode, 'Payment gateway response verification failed.', null));
-                }
-            } else {
-                let error_msg = ''; let error_data = null; let tmpBody = null; let tmpRspPayload = null;
-                try {
-                    const error_text = await kvm_response.text(); tmpBody = error_text;
-                    const is_verified = jws.verify(error_text, "HS256", process.env.BILL_DESK_SECRETKEY);
-                    if (is_verified) {
-                        error_data = jws.decode(error_text);
-                        if (error_data != null) {
-                            const payloadData = JSON.parse(error_data.payload);
-                            tmpRspPayload = payloadData;
-                            error_msg = payloadData != null && payloadData.message != null && payloadData.message.length > 0 ? payloadData.message : '';
-                        }
-                    }
-                } catch (_) {
-                }
-                if (error_msg.length <= 0) {
-                    error_msg = kvm_response.statusText;
-                }
-
-                let rspHeadersValues = {};
-                if (kvm_response.headers) {
-                    for (const [rhKey, rhValue] of kvm_response.headers.entries()) { rspHeadersValues[rhKey] = rhValue; }
-                }
-
-                const logData = {
-                    traceid: _traceid, timestamp: _timestamp, order_id: order_id, payload: payment_raw_object, signature: req_signature,
-                    resp_hdeader: rspHeadersValues, resp_err: error_msg, resp_text: tmpBody,
-                    status_code: kvm_response.status, resp_payload: tmpRspPayload,
-                };
-                console.log("=============logData==============", logData);
-
-                paymentService.log_bill_desk_payment('error', ip, 'Create order gateway error: ' + error_msg, logData);
-
-                return res.status(200).json(success(false, res.statusCode, 'Payment gateway error.<br>"' + error_msg + '".', null));
-            }
-
-        } else {
+        if (!row) {
             return res.status(200).json(success(false, res.statusCode, 'User details not found, please try again.', null));
         }
+
+        const _total_amount = validatePaymentAmount(total_amount);
+        if (_total_amount <= 0) {
+            return res.status(200).json(success(false, res.statusCode, 'Please enter wallet balance amount.', null));
+        }
+
+        if (await checkRecentPayment(req.token_data.customer_id)) {
+            return res.status(200).json(success(false, res.statusCode, 'A recent payment was made. Please wait 5 minutes before trying again.', null));
+        }
+
+        const _user_agent = user_agent?.length ? user_agent : "";
+        if (_user_agent.toLowerCase().trim() !== req.headers['user-agent'].toLowerCase().trim()) {
+            return res.status(200).json(success(false, res.statusCode, 'browser user agent does not matched.', null));
+        }
+
+        const temp_id = await commonModule.payment_order_id_new();
+        if (!temp_id?.length) {
+            return res.status(200).json(success(false, res.statusCode, 'Unable to create order id, Please try again.', null));
+        }
+
+        const currDate = new Date();
+        const order_id = Constants.proj_payment_order_id_int_prefix + temp_id.toString();
+        const curr_order_date = dateFormat(Constants.payment_api_order_date_format, currDate);
+        let ip = ''; try { ip = requestIp.getClientIp(req); } catch { }
+        const _traceid = crypto.randomUUID().toString().replaceAll('-', '');
+        const _timestamp = currDate.getTime().toString();
+
+        const deviceObj = buildPaymentDeviceObject({
+            user_agent, browser_language, browser_javascript_enabled, browser_tz,
+            browser_color_depth, browser_java_enabled, browser_screen_height, browser_screen_width, ip
+        });
+
+        const payment_raw_object = JSON.stringify({
+            orderid: order_id, mercid: process.env.BILL_DESK_MERCID, order_date: curr_order_date,
+            amount: _total_amount, currency: '356', ru: `${process.env.APIS_BASE_URL}customer/bill_desk_response`,
+            itemcode: 'DIRECT', device: deviceObj,
+        });
+
+        const req_signature = billDeskModule.jws_hmac(payment_raw_object);
+        const kvm_response = await billDeskModule.create_order(payment_raw_object, req_signature, _traceid, _timestamp);
+
+        const context = { _traceid, _timestamp, order_id, payment_raw_object, req_signature, ip, req, _total_amount };
+
+        if (kvm_response.status === 200) {
+            const result = await processPaymentSuccess(kvm_response, context);
+            if (result.error) return res.status(200).json(success(false, res.statusCode, result.error, null));
+            return res.status(200).json(success(true, res.statusCode, '', result.flow_config));
+        }
+
+        const error_msg = await processPaymentError(kvm_response, context);
+        return res.status(200).json(success(false, res.statusCode, 'Payment gateway error.<br>"' + error_msg + '".', null));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(200).json(success(false, res.statusCode, err.message, null));
@@ -3436,7 +3302,7 @@ const wallets_details_export = async (req, res, next) => {
 
 const customer_apigee_balance_update = async (req, res, next) => {
     try {
-        let _customer_id = req.token_data.customer_id && validator.isNumeric(req.token_data.customer_id.toString()) ? parseInt(req.token_data.customer_id) : 0;
+        // let _customer_id = req.token_data.customer_id && validator.isNumeric(req.token_data.customer_id.toString()) ? parseInt(req.token_data.customer_id) : 0;
         const { CstCustomer } = getModels();
 
         const row1 = await CstCustomer.findOne({
@@ -3456,6 +3322,44 @@ const customer_apigee_balance_update = async (req, res, next) => {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
     }
+};
+
+// Helper: Find app wallet rate value matching product name
+const findAppWalletRateValue = (appWalletRateData, productName) => {
+    if (!appWalletRateData) return '';
+    const productNameLower = productName.toLowerCase().trim();
+    for (const rate of appWalletRateData) {
+        const rateName = rate.name.replace("rateMultiper-", "").toLowerCase().trim();
+        if (rateName === productNameLower) {
+            return rate.value;
+        }
+    }
+    return '';
+};
+
+// Helper: Calculate consumption pricing rates
+const calculateConsumptionPricingRates = (item, productPricingRates, appRateValue) => {
+    if (item.monitizationRate?.consumption_pricing_type !== 'FIXED_PER_UNIT') {
+        return productPricingRates;
+    }
+    const feeUnits = productPricingRates?.[0]?.fee?.units || 0;
+    const multiplier = appRateValue || item.rate_plan_value;
+    return feeUnits * multiplier;
+};
+
+// Helper: Format product with rate data
+const formatProductWithRates = (item, appWalletRateData) => {
+    const productPricingRates = db.convertStringToJson(item.monitizationRate?.consumption_pricing_rates);
+    const appRateValue = findAppWalletRateValue(appWalletRateData, item.product_name);
+    const consumptionRates = calculateConsumptionPricingRates(item, productPricingRates, appRateValue);
+
+    return {
+        product_id: item.product_id,
+        product_name: item.product_name,
+        consumption_pricing_type: item.monitizationRate?.consumption_pricing_type,
+        consumption_pricing_rates: consumptionRates,
+        app_rate_value: appRateValue?.length > 0 ? appRateValue : item.rate_plan_value,
+    };
 };
 
 const app_list_rate_get = async (req, res, next) => {
@@ -3499,38 +3403,12 @@ const app_list_rate_get = async (req, res, next) => {
             }]
         });
 
-        let products = []; let app_rateValue = '';
-        if (row2) {
-            for (const appProduct of row2) {
-                const item = appProduct.product;
-                if (!item) continue;
+        const appWalletRateData = db.convertStringToJson(appData?.app_wallet_rate_data);
+        const products = (row2 || [])
+            .filter(appProduct => appProduct.product)
+            .map(appProduct => formatProductWithRates(appProduct.product, appWalletRateData));
 
-                const product_pricing_rates = db.convertStringToJson(item.monitizationRate?.consumption_pricing_rates);
-                const app_wallet_rate_data = db.convertStringToJson(appData?.app_wallet_rate_data);
-                if (app_wallet_rate_data) {
-                    for (const rate of app_wallet_rate_data) {
-                        const rateName = rate.name.replace("rateMultiper-", "").toLowerCase().trim();
-                        if (rateName === item.product_name.toLowerCase().trim()) {
-                            app_rateValue = rate.value;
-                            break;
-                        }
-                    }
-                }
-                let consumption_pricing_rates = product_pricing_rates;
-                if (item.monitizationRate?.consumption_pricing_type === 'FIXED_PER_UNIT') {
-                    consumption_pricing_rates = app_rateValue ? consumption_pricing_rates[0]?.fee?.units * app_rateValue : consumption_pricing_rates[0]?.fee?.units * item.rate_plan_value;
-                }
-                products.push({
-                    product_id: item.product_id,
-                    product_name: item.product_name,
-                    consumption_pricing_type: item.monitizationRate?.consumption_pricing_type,
-                    consumption_pricing_rates: consumption_pricing_rates,
-                    app_rate_value: app_rateValue && app_rateValue.length > 0 ? app_rateValue : item.rate_plan_value,
-                });
-            }
-        }
-        const results = { products: products };
-        return res.status(200).json(success(true, res.statusCode, "My Apps Product Rate Data.", results));
+        return res.status(200).json(success(true, res.statusCode, "My Apps Product Rate Data.", { products }));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));

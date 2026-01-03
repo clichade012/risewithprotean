@@ -476,16 +476,6 @@ const proxy_data = async (req, res, next) => {
 
 const default_res = { status: 401, data: JSON.stringify({ "status": false, "error_code": 401, "error_description": "Invalid Access Token" }, null, 4), };
 
-// Helper to get endpoint for play API
-const getEndpointForPlayApi = async (endpointId) => {
-    const { Endpoint, Proxies } = getModels();
-    return Endpoint.findOne({
-        attributes: ['endpoint_id', 'display_name', 'endpoint_url', 'updated_endpoint', 'methods', 'path_params', 'header_param', 'request_schema', 'request_sample'],
-        where: { endpoint_id: endpointId, is_deleted: false, [Op.or]: [{ is_published: true }, { is_product_published: true }] },
-        include: [{ model: Proxies, as: 'proxy', attributes: ['proxy_id', 'product_id', 'proxy_name'], where: { is_published: true, is_deleted: false }, required: true }]
-    });
-};
-
 // Helper to get 401 schema
 const get401Schema = async (endpointId) => {
     const { ProxySchema } = getModels();
@@ -538,7 +528,7 @@ const play_api = async (req, res, next) => {
     const { endpoint, path_param, header_param, json_body } = req.body;
     try {
         const endpoint_id = parseNumericParam(endpoint);
-        const endpointData = await getEndpointForPlayApi(endpoint_id);
+        const endpointData = await getEndpointWithProxy(endpoint_id);
 
         if (!endpointData) {
             return res.status(200).json(success(true, res.statusCode, "success", default_res));

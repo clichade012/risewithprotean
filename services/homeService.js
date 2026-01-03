@@ -201,180 +201,195 @@ const signup_data = async (req, res, next) => {
     }
 };
 
+// Helper to parse numeric ID
+const parseNumericId = (value) => {
+    if (!value) return 0;
+    const strValue = String(value);
+    return validator.isNumeric(strValue) ? parseInt(strValue) : 0;
+};
+
+// Helper to validate captcha
+const validateCaptcha = async (captcha_token) => {
+    const _captcha_token = captcha_token?.length > 0 ? captcha_token : '';
+    const captchaUrl = `https://www.google.com/recaptcha/api/siteverify?secret=${process.env.CAPTCHA_SECRET}&response=${_captcha_token}`;
+    try {
+        const captchaResp = await fetch(captchaUrl);
+        if (captchaResp.ok) {
+            const captchaData = await captchaResp.json();
+            return captchaData?.success === true;
+        }
+    } catch (error) {
+        console.error('CAPTCHA validation failed:', error.message);
+    }
+    return false;
+};
+
+// Helper to validate signup name fields
+const validateNameFields = (first_name, last_name) => {
+    if (!first_name?.length) return "Please enter first name.";
+    if (first_name.length > 30) return "First name should not be more than 30 character";
+    if (!last_name?.length) return "Please enter last name.";
+    if (last_name.length > 30) return "Last name should not be more than 30 character";
+    return null;
+};
+
+// Helper to validate contact fields
+const validateContactFields = (network_id, mobile_no, email_id) => {
+    if (!network_id || !validator.isNumeric(String(network_id)) || network_id <= 0) {
+        return "Please select country code.";
+    }
+    if (!mobile_no?.length) return "Please enter mobile number.";
+    if (!validator.isNumeric(mobile_no) || mobile_no.length !== 10) return "Invalid mobile number.";
+    if (!email_id?.length) return "Please enter email address.";
+    if (!validator.isEmail(email_id)) return "Invalid email address.";
+    return null;
+};
+
+// Helper to validate external services (email & mobile)
+const validateExternalServices = async (email_id, mobile_no) => {
+    const isEmailValid = await apigeeService.emailVerification(email_id);
+    console.log("=====isEmailValid===", isEmailValid);
+    if (!isEmailValid) return "Invalid email address. Please enter a valid one.";
+
+    const isMobileValid = await apigeeService.mobileVerification(mobile_no);
+    console.log("=====isMobileValid===", isMobileValid);
+    if (!isMobileValid) return "Invalid mobile no. Please enter a valid one.";
+
+    return null;
+};
+
+// Helper to validate business fields
+const validateBusinessFields = (industry_id, company_name) => {
+    if (!industry_id || !validator.isNumeric(String(industry_id)) || industry_id <= 0) {
+        return "Please select business category.";
+    }
+    if (!company_name?.length) return "Please enter company name.";
+    return null;
+};
+
+// Helper to validate password
+const validatePassword = (password) => {
+    if (!password?.length) return "Please enter password.";
+    if (password.length < 8) return "The password must contain atleast 8 characters.";
+    if (!/\d/.test(password)) return "The password must contain a number.";
+    if (!/[`!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?~]/.test(password)) return "The password must contain a special character.";
+    return null;
+};
+
+// Helper to check duplicate user
+const checkDuplicateUser = async (email_id, mobile_no, CstCustomer) => {
+    const emailExists = await CstCustomer.findOne({
+        attributes: ['customer_id'],
+        where: { email_id: email_id, is_deleted: false }
+    });
+    if (emailExists) return "Email address is already registered.";
+
+    const mobileExists = await CstCustomer.findOne({
+        attributes: ['customer_id'],
+        where: { mobile_no: mobile_no, is_deleted: false }
+    });
+    if (mobileExists) return "Mobile number is already registered.";
+
+    return null;
+};
+
+// Helper to handle post-registration tasks
+const handlePostRegistration = async (customer_id, unique_id, Settings, CstCustomer, _query1, _replacements2) => {
+    let is_auto_approve = false;
+    const settingsRow = await Settings.findOne({ attributes: ['is_auto_approve_customer'] });
+    if (settingsRow?.is_auto_approve_customer === true) {
+        await admCustomerService.customer_approve_auto(customer_id);
+        is_auto_approve = true;
+    }
+
+    await customerService.send_activation_link(customer_id);
+    await customerService.sendSignUpMail(customer_id);
+
+    const row15 = await CstCustomer.findOne({
+        attributes: ['account_id'],
+        where: { customer_id: customer_id }
+    });
+
+    try {
+        const data_to_log = {
+            correlation_id: correlator.getId(),
+            token_id: 0,
+            account_id: row15?.account_id || 0,
+            user_type: 2,
+            user_id: customer_id,
+            narration: 'New customer registered and activation link sent.' + (is_auto_approve ? ' (Auto approved)' : ''),
+            query: db.buildQuery_Array(_query1, _replacements2),
+        };
+        action_logger.info(JSON.stringify(data_to_log));
+    } catch (_) { }
+
+    return { id: unique_id };
+};
+
 const signup_new = async (req, res, next) => {
     const { post_data, captcha_token } = req.body;
     try {
         const { CstCustomer, Settings } = getModels();
-        let jsonData = JSON.parse(rsa_decrypt(post_data));
+        const jsonData = JSON.parse(rsa_decrypt(post_data));
 
-        let company_name = jsonData.company_name;
-        let first_name = jsonData.first_name;
-        let last_name = jsonData.last_name;
-        let email_id = jsonData.email_id?.toLowerCase().trim();
-        let network_id = jsonData.network_id;
-        let mobile_no = jsonData.mobile_no;
-        let segment_id = jsonData.segment_id;
-        let industry_id = jsonData.industry_id;
-        let user_name = jsonData.user_name;
-        let password = jsonData.password;
-        let _captcha_token = ''; if (captcha_token && captcha_token.length > 0) { _captcha_token = captcha_token; }
-        const captchaUrl = `https://www.google.com/recaptcha/api/siteverify?secret=${process.env.CAPTCHA_SECRET}&response=${_captcha_token}`
-        let captcha_valid = false;
-        try {
-            const captchaResp = await fetch(captchaUrl);
-            if (captchaResp.ok) {
-                const captchaData = await captchaResp.json();
-                if (captchaData?.success) {
-                    captcha_valid = true;
-                }
-            }
-        } catch (error) {
-            console.error('CAPTCHA validation failed:', error.message);
-        }
+        // Validate captcha
+        const captcha_valid = await validateCaptcha(captcha_token);
         if (!captcha_valid) {
             return res.status(200).json(success(false, res.statusCode, "Incorrect captcha.", null));
         }
-        if (!first_name || first_name.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter first name.", null));
-        }
 
-        if (first_name.length > 30) {
-            return res.status(200).json(success(false, res.statusCode, "First name  should not be more than 30 character", null));
-        }
-        if (!last_name || last_name.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter last name.", null));
-        }
-        if (last_name.length > 30) {
-            return res.status(200).json(success(false, res.statusCode, "Last name  should not be more than 30 character", null));
-        }
+        // Extract and validate fields
+        let { first_name, last_name, email_id, network_id, mobile_no, segment_id, industry_id, company_name, user_name, password } = jsonData;
+        email_id = email_id?.toLowerCase().trim();
+
+        // Validate name fields
+        const nameError = validateNameFields(first_name, last_name);
+        if (nameError) return res.status(200).json(success(false, res.statusCode, nameError, null));
         first_name = sanitizeInput(first_name);
         last_name = sanitizeInput(last_name);
 
-        if (!network_id || !validator.isNumeric(network_id.toString()) || network_id <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please select country code.", null));
-        }
-        if (!mobile_no || mobile_no.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter mobile number.", null));
-        }
-        if ((mobile_no && mobile_no.length > 0 && !validator.isNumeric(mobile_no)) || mobile_no.length != 10) {
-            return res.status(200).json(success(false, res.statusCode, "Invalid mobile number.", null));
-        }
-        if (!email_id || email_id.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter email address.", null));
-        }
-        if (email_id && email_id.length > 0 && !validator.isEmail(email_id)) {
-            return res.status(200).json(success(false, res.statusCode, "Invalid email address.", null));
-        }
+        // Validate contact fields
+        const contactError = validateContactFields(network_id, mobile_no, email_id);
+        if (contactError) return res.status(200).json(success(false, res.statusCode, contactError, null));
 
-        let isEmailValid = await apigeeService.emailVerification(email_id);
-        console.log("=====isEmailValid===", isEmailValid);
-        if (!isEmailValid) {
-            return res.status(200).json(success(false, res.statusCode, "Invalid email address. Please enter a valid one.", null));
-        }
-        let isMobileValid = await apigeeService.mobileVerification(mobile_no);
-        console.log("=====isMobileValid===", isMobileValid);
-        if (!isMobileValid) {
-            return res.status(200).json(success(false, res.statusCode, "Invalid mobile no. Please enter a valid one.", null));
-        }
+        // Validate external services
+        const externalError = await validateExternalServices(email_id, mobile_no);
+        if (externalError) return res.status(200).json(success(false, res.statusCode, externalError, null));
 
-        if (!segment_id || !validator.isNumeric(segment_id.toString()) || segment_id <= 0) { segment_id = 0; }
-        // if (!segment_id || !validator.isNumeric(segment_id.toString()) || segment_id <= 0) {
-        //     return res.status(200).json(success(false, res.statusCode, "Please select segment.", null));
-        // }
-        if (!industry_id || !validator.isNumeric(industry_id.toString()) || industry_id <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please select business category.", null));
-        }
-        if (!company_name || company_name.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter company name.", null));
-        }
+        // Normalize segment_id
+        segment_id = parseNumericId(segment_id) || 0;
+
+        // Validate business fields
+        const businessError = validateBusinessFields(industry_id, company_name);
+        if (businessError) return res.status(200).json(success(false, res.statusCode, businessError, null));
         company_name = sanitizeInput(company_name);
-        if (!user_name || user_name == null) { user_name = ''; }
-        // if (!user_name || user_name.length <= 0) {
-        //     return res.status(200).json(success(false, res.statusCode, "Please enter user name.", null));
-        // }
-        if (!password || password.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter password.", null));
-        }
-        if (password.length < 8) {
-            return res.status(200).json(success(false, res.statusCode, "The password must contain atleast 8 characters.", null));
-        }
-        const hasNumber = /\d/;
-        if (!hasNumber.test(password)) {
-            return res.status(200).json(success(false, res.statusCode, "The password must contain a number.", null));
-        }
-        const specialChars = /[`!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?~]/;
-        if (!specialChars.test(password)) {
-            return res.status(200).json(success(false, res.statusCode, "The password must contain a special character.", null));
-        }
+        user_name = user_name || '';
 
+        // Validate password
+        const passwordError = validatePassword(password);
+        if (passwordError) return res.status(200).json(success(false, res.statusCode, passwordError, null));
 
-        const row1 = await CstCustomer.findOne({
-            attributes: ['customer_id'],
-            where: { email_id: email_id, is_deleted: false }
-        });
-        if (row1) {
-            return res.status(200).json(success(false, res.statusCode, "Email address is already registered.", null));
-        }
-        const row2 = await CstCustomer.findOne({
-            attributes: ['customer_id'],
-            where: { mobile_no: mobile_no, is_deleted: false }
-        });
-        if (row2) {
-            return res.status(200).json(success(false, res.statusCode, "Mobile number is already registered.", null));
-        }
+        // Check for duplicate user
+        const duplicateError = await checkDuplicateUser(email_id, mobile_no, CstCustomer);
+        if (duplicateError) return res.status(200).json(success(false, res.statusCode, duplicateError, null));
 
-        let password_hash = await bcrypt.hash(password, 10);
-
+        // Create customer
+        const password_hash = await bcrypt.hash(password, 10);
         const _query1 = `INSERT INTO cst_customer(company_name, first_name, last_name, email_id, network_id, mobile_no, user_name, user_pass,
             register_date, is_enabled, is_deleted, is_approved, industry_id, segment_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING "customer_id", "unique_id"`;
         const _replacements2 = [company_name, first_name, last_name, email_id, network_id, mobile_no, user_name, password_hash, db.get_ist_current_date(), true, false, 0, industry_id, segment_id];
         const [rowOut] = await db.sequelize.query(_query1, { replacements: _replacements2, type: QueryTypes.INSERT });
-        const customer_id = (rowOut && rowOut.length > 0 && rowOut[0] ? rowOut[0].customer_id : 0);
-        const unique_id = (rowOut && rowOut.length > 0 && rowOut[0] ? rowOut[0].unique_id : "");
+
+        const customer_id = rowOut?.[0]?.customer_id || 0;
+        const unique_id = rowOut?.[0]?.unique_id || "";
 
         if (customer_id > 0) {
-            const results = { id: unique_id, };
             res.setHeader('x-customer-key', unique_id);
-
-            let is_auto_approve = false;
-            const settingsRow = await Settings.findOne({
-                attributes: ['is_auto_approve_customer']
-            });
-            if (settingsRow) {
-                is_auto_approve = settingsRow.is_auto_approve_customer;
-                if (is_auto_approve && is_auto_approve === true) {
-                    await admCustomerService.customer_approve_auto(customer_id);
-                    is_auto_approve = true;
-                }
-            }
-
-            await customerService.send_activation_link(customer_id);/* send activation link to user from this link user will activate itself */
-            await customerService.sendSignUpMail(customer_id);/* send mail to businees team email id after sign up*/
-
-            const row15 = await CstCustomer.findOne({
-                attributes: ['account_id'],
-                where: { customer_id: customer_id }
-            });
-
-            try {
-                let data_to_log = {
-                    correlation_id: correlator.getId(),
-                    token_id: 0,
-                    account_id: (row15 ? row15.account_id : 0),
-                    user_type: 2,
-                    user_id: customer_id,
-                    narration: 'New customer registered and activation link sent.' + (is_auto_approve ? ' (Auto approved)' : ''),
-                    query: db.buildQuery_Array(_query1, _replacements2),
-                }
-                action_logger.info(JSON.stringify(data_to_log));
-            } catch (_) { }
-
-
+            const results = await handlePostRegistration(customer_id, unique_id, Settings, CstCustomer, _query1, _replacements2);
             return res.status(200).json(success(true, API_STATUS.CUSTOMER_REGISTERED.value, "Your registration is successful. You will receive an email with activation link.", results));
-        } else {
-            return res.status(200).json(success(false, res.statusCode, "Unable to register, Please try again.", null));
         }
+        return res.status(200).json(success(false, res.statusCode, "Unable to register, Please try again.", null));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
@@ -715,10 +730,10 @@ const validateContactForm = (data) => {
     if (!validator.isEmail(email_id)) return "Please enter correct email address.";
     if (!company_name?.length) return "Please enter company name.";
 
-    const _category_id = category_id && validator.isNumeric(category_id.toString()) ? parseInt(category_id) : 0;
+    const _category_id = parseNumericId(category_id);
     if (_category_id <= 0) return "Please select issue type.";
 
-    const _network_id = network_id && validator.isNumeric(network_id.toString()) ? parseInt(network_id) : 0;
+    const _network_id = parseNumericId(network_id);
     if (_network_id <= 0) return "Please select country code.";
 
     if (!mobile_no?.length) return "Please enter mobile number.";
