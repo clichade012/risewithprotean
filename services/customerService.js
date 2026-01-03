@@ -148,7 +148,7 @@ const sendContactUsConfirmationEmail = async (template, data) => {
 };
 
 const contact_us_save = async (req, res, next) => {
-    const { first_name, last_name, email_id, company_name, category_id, network_id, mobile_no, subject, message } = req.body;
+    const { first_name, last_name, email_id, company_name,  mobile_no, subject, message } = req.body;
     try {
         const { FeedbackCategory, EmailTemplate } = getModels();
 
