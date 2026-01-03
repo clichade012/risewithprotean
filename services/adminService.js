@@ -90,9 +90,10 @@ const getUserPermissions = async (user) => {
 
 const login = async (req, res, next) => {
     const { post_data } = req.body;
+    console.log(post_data,"post_data")
     try {
         let jsonData = JSON.parse(rsa_decrypt(post_data));
-
+          console.log("JSONDAtA",jsonData)
         let user_name = jsonData.user_name;
         let password = jsonData.password;
 
@@ -119,6 +120,9 @@ const login = async (req, res, next) => {
                 attributes: ['role_id', 'role_name']
             }]
         });
+
+        console.log(user,"user")
+
 
         if (!user) {
             return res.status(200).json(success(false, res.statusCode, "Invalid username or password.", null));

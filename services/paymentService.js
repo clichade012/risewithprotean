@@ -141,7 +141,8 @@ const logTransactionError = (ip_addr, errorType, data) => {
 };
 
 // Helper: Process payment for internal order
-const processInternalOrderPayment = async (orderid, reqBody, transaction_response, success_data, payloadData, fields, currDate, ip_addr) => {
+const processInternalOrderPayment = async (context) => {
+    const { orderid, reqBody, transaction_response, success_data, payloadData, fields, currDate, ip_addr } = context;
     console.log("=============orderid.startsWith(constants.proj_payment_order_id_int_prefix)==========", true);
     await updatePaymentRecord(orderid, reqBody, transaction_response, success_data, payloadData, fields, currDate);
 
@@ -176,7 +177,16 @@ const bill_desk_response = async (req, res, next) => {
         console.log("=============orderid==========", fields.orderid);
 
         if (fields.orderid.startsWith(Constants.proj_payment_order_id_int_prefix)) {
-            await processInternalOrderPayment(fields.orderid, req.body, transaction_response, success_data, payloadData, fields, currDate, ip_addr);
+            await processInternalOrderPayment({
+                orderid: fields.orderid,
+                reqBody: req.body,
+                transaction_response,
+                success_data,
+                payloadData,
+                fields,
+                currDate,
+                ip_addr
+            });
         } else {
             console.log("=============else id.startsWithorderid==========", fields.orderid, "==constants.proj_payment_order_id_int_prefix==", Constants.proj_payment_order_id_int_prefix);
             console.log("=============else id.startsWithorderid==========", fields.orderid.startsWith(Constants.proj_payment_order_id_int_prefix));

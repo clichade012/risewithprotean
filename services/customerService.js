@@ -8,8 +8,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { fetch } from 'cross-fetch';
 import redisDB from '../database/redis_cache.js';
-import { randomUUID, X509Certificate } from 'crypto';
-import crypto from 'crypto';
+import crypto, { randomUUID, X509Certificate } from 'crypto';
 import dateFormat from 'date-format';
 import validator from 'validator';
 import emailTransporter from "../services/emailService.js";
@@ -26,7 +25,6 @@ import moment from 'moment';
 import excel from 'exceljs';
 import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
-import { createObjectCsvWriter } from 'csv-writer';
 import requestIp from 'request-ip';
 
 const getModels = () => db.models;
@@ -98,204 +96,201 @@ const contact_us_form = async (req, res, next) => {
     }
 };
 
+// Helper to validate contact form fields
+const validateContactForm = (data) => {
+    const { first_name, last_name, email_id, company_name, category_id, network_id, mobile_no, subject, message } = data;
+
+    if (!first_name?.length) return "Please enter first name.";
+    if (!last_name?.length) return "Please enter last name.";
+    if (!email_id?.length) return "Please enter email address.";
+    if (!validator.isEmail(email_id)) return "Please enter correct email address.";
+    if (!company_name?.length) return "Please enter company name.";
+
+    const _category_id = (category_id && validator.isNumeric(category_id.toString())) ? parseInt(category_id) : 0;
+    if (_category_id <= 0) return "Please select issue type.";
+
+    const _network_id = (network_id && validator.isNumeric(network_id.toString())) ? parseInt(network_id) : 0;
+    if (_network_id <= 0) return "Please select country code.";
+
+    if (!mobile_no?.length) return "Please enter mobile number.";
+    if (!validator.isNumeric(mobile_no) || mobile_no.length !== 10) return "Please enter correct mobile number.";
+    if (!subject?.length) return "Please enter subject.";
+    if (!message?.length) return "Please enter message.";
+
+    return { valid: true, _category_id, _network_id };
+};
+
+// Helper to send contact us confirmation email
+const sendContactUsConfirmationEmail = async (template, data) => {
+    if (!template?.is_enabled) return;
+
+    let _subject = template.subject || "";
+    let body_text = template.body_text || "";
+
+    _subject = _subject.replaceAll('{{TICKET_ID}}', data.ticket_id);
+    body_text = body_text.replaceAll('{{FULL_NAME}}', `${data.first_name} ${data.last_name}`);
+    body_text = body_text.replaceAll('{{TICKET_ID}}', data.ticket_id);
+    body_text = body_text.replaceAll('{{ISSUE_TYPE}}', data.category_name);
+    body_text = body_text.replaceAll('{{SUBJECT}}', data.subject);
+    body_text = body_text.replaceAll('{{MESSAGE}}', data.message);
+    body_text = body_text.replaceAll(process.env.SITE_URL_TAG, process.env.FRONT_SITE_URL);
+
+    try {
+        await supportTransporter.sendMail({
+            from: process.env.EMAIL_SUPPORT_EMAIL,
+            to: data.email_id,
+            subject: _subject,
+            html: body_text,
+        });
+    } catch (err) {
+        _logger.error(err.stack);
+    }
+};
+
 const contact_us_save = async (req, res, next) => {
     const { first_name, last_name, email_id, company_name, category_id, network_id, mobile_no, subject, message } = req.body;
     try {
         const { FeedbackCategory, EmailTemplate } = getModels();
 
-        if (!first_name || first_name.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter first name.", null));
+        const validation = validateContactForm(req.body);
+        if (typeof validation === 'string') {
+            return res.status(200).json(success(false, res.statusCode, validation, null));
         }
-        if (!last_name || last_name.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter last name.", null));
-        }
-        if (!email_id || email_id.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter email address.", null));
-        }
-        if (email_id && email_id.length > 0 && !validator.isEmail(email_id)) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter correct email address.", null));
-        }
-        if (!company_name || company_name.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter company name.", null));
-        }
-        let _category_id = category_id && validator.isNumeric(category_id.toString()) ? parseInt(category_id) : 0;
-        if (_category_id <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please select issue type.", null));
-        }
-        let _network_id = network_id && validator.isNumeric(network_id.toString()) ? parseInt(network_id) : 0;
-        if (_network_id <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please select country code.", null));
-        }
-        if (!mobile_no || mobile_no.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter mobile number.", null));
-        }
-        if ((mobile_no && mobile_no.length > 0 && !validator.isNumeric(mobile_no)) || mobile_no.length != 10) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter correct mobile number.", null));
-        }
-        if (!subject || subject.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter subject.", null));
-        }
-        if (!message || message.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter message.", null));
-        }
+        const { _category_id, _network_id } = validation;
 
-        // Insert with custom sequence formula - keeping raw query due to complex sequence logic
         const _query1 = `INSERT INTO feedback_data(customer_id, first_name, last_name, email_id, company_name, category_id, network_id, mobile_no,
              subject, message, is_deleted, added_date, ticket_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (NEXTVAL('feedback_ticket_id_sequence') * 100 + currval('feedback_ticket_id_sequence'))) RETURNING "feedback_id" , "ticket_id"`;
         const _replacements2 = [req.token_data.customer_id, first_name, last_name, email_id, company_name, _category_id, _network_id, mobile_no, subject, message, false, db.get_ist_current_date()];
         const [row1] = await db.sequelize.query(_query1, { replacements: _replacements2, type: QueryTypes.INSERT });
-        const feedback_id = (row1 && row1.length > 0 && row1[0] ? row1[0].feedback_id : 0);
-        const ticket_id = (row1 && row1.length > 0 && row1[0] ? row1[0].ticket_id : 0);
 
-        if (feedback_id > 0) {
-            // Get feedback category using ORM
-            const categoryData = await FeedbackCategory.findOne({
-                attributes: ['category_id', 'category_name'],
-                where: {
-                    is_enabled: true,
-                    is_deleted: false,
-                    category_id: _category_id,
-                },
-            });
-            if (!categoryData) {
-                return res.status(200).json(success(false, res.statusCode, "Contact us category not found.", null));
-            }
+        const feedback_id = row1?.[0]?.feedback_id || 0;
+        const ticket_id = row1?.[0]?.ticket_id || 0;
 
-            // Get email template using ORM
-            const emailTemplate = await EmailTemplate.findOne({
-                attributes: ['subject', 'body_text', 'is_enabled'],
-                where: {
-                    template_id: EmailTemplates.CONTACT_US_REPLY.value,
-                },
-            });
-            if (emailTemplate) {
-                if (emailTemplate.is_enabled) {
-                    let _subject = emailTemplate.subject && emailTemplate.subject.length > 0 ? emailTemplate.subject : "";
-                    let body_text = emailTemplate.body_text && emailTemplate.body_text.length > 0 ? emailTemplate.body_text : "";
-                    _subject = _subject.replaceAll('{{TICKET_ID}}', ticket_id);
-
-                    body_text = body_text.replaceAll('{{FULL_NAME}}', first_name + ' ' + last_name);
-                    body_text = body_text.replaceAll('{{TICKET_ID}}', ticket_id);
-                    body_text = body_text.replaceAll('{{ISSUE_TYPE}}', categoryData.category_name);
-                    body_text = body_text.replaceAll('{{SUBJECT}}', subject);
-                    body_text = body_text.replaceAll('{{MESSAGE}}', message);
-                    body_text = body_text.replaceAll(process.env.SITE_URL_TAG, process.env.FRONT_SITE_URL);
-                    let mailOptions = {
-                        from: process.env.EMAIL_SUPPORT_EMAIL,
-                        to: email_id,
-                        subject: _subject,
-                        html: body_text,
-                    }
-                    try {
-                        await supportTransporter.sendMail(mailOptions);
-                    } catch (err) {
-                        _logger.error(err.stack);
-                    }
-                    return res.status(200).json(success(true, res.statusCode, "Your message submitted successfully.", null));
-                } else {
-                    return res.status(200).json(success(true, res.statusCode, "Your message submitted successfully.", null));
-                }
-            }
-
-            try {
-                let data_to_log = {
-                    correlation_id: correlator.getId(),
-                    token_id: req.token_data.token_id,
-                    account_id: req.token_data.account_id,
-                    user_type: 2,
-                    user_id: req.token_data.customer_id,
-                    narration: 'New contact us issue raised.',
-                    query: db.buildQuery_Array(_query1, _replacements2),
-                    date_time: db.get_ist_current_date(),
-                }
-                action_logger.info(JSON.stringify(data_to_log));
-            } catch (_) { }
-            return res.status(200).json(success(true, res.statusCode, "Your message submitted successfully.", null));
-        } else {
+        if (feedback_id <= 0) {
             return res.status(200).json(success(false, res.statusCode, "Unable to save your feedback, Please try again.", null));
         }
+
+        const categoryData = await FeedbackCategory.findOne({
+            attributes: ['category_id', 'category_name'],
+            where: { is_enabled: true, is_deleted: false, category_id: _category_id },
+        });
+
+        if (!categoryData) {
+            return res.status(200).json(success(false, res.statusCode, "Contact us category not found.", null));
+        }
+
+        const emailTemplate = await EmailTemplate.findOne({
+            attributes: ['subject', 'body_text', 'is_enabled'],
+            where: { template_id: EmailTemplates.CONTACT_US_REPLY.value },
+        });
+
+        await sendContactUsConfirmationEmail(emailTemplate, {
+            ticket_id, first_name, last_name, email_id, subject, message,
+            category_name: categoryData.category_name
+        });
+
+        try {
+            action_logger.info(JSON.stringify({
+                correlation_id: correlator.getId(),
+                token_id: req.token_data.token_id,
+                account_id: req.token_data.account_id,
+                user_type: 2,
+                user_id: req.token_data.customer_id,
+                narration: 'New contact us issue raised.',
+                query: db.buildQuery_Array(_query1, _replacements2),
+                date_time: db.get_ist_current_date(),
+            }));
+        } catch (_) { }
+
+        return res.status(200).json(success(true, res.statusCode, "Your message submitted successfully.", null));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
     }
 };
 
+// Helper to generate activation token and link
+const generateActivationLink = () => {
+    const uuid = randomUUID();
+    const uuid_encoded = encodeURIComponent(Buffer.from(uuid.toString(), 'utf8').toString('base64'));
+    return { uuid, link: process.env.FRONT_SITE_URL + 'verify/' + uuid_encoded };
+};
+
+// Helper to process customer email template with replacements
+const processCustomerEmailTemplate = (template, customer, extraReplacements = {}) => {
+    let subject = template.subject || "";
+    let body_text = template.body_text || "";
+
+    const replacements = {
+        [process.env.EMAIL_TAG_FIRST_NAME]: customer.first_name,
+        [process.env.EMAIL_TAG_LAST_NAME]: customer.last_name,
+        [process.env.EMAIL_TAG_EMAIL_ID]: customer.email_id,
+        [process.env.EMAIL_TAG_MOBILE_NO]: customer.mobile_no,
+        [process.env.SITE_URL_TAG]: process.env.FRONT_SITE_URL,
+        ...extraReplacements
+    };
+
+    for (const [tag, value] of Object.entries(replacements)) {
+        if (tag && value !== undefined) {
+            subject = subject.replaceAll(tag, value);
+            body_text = body_text.replaceAll(tag, value);
+        }
+    }
+
+    return { subject, body_text };
+};
+
+// Helper to send email via transporter
+const sendCustomerEmail = async (to, subject, body_text) => {
+    try {
+        await emailTransporter.sendMail({
+            from: process.env.EMAIL_CONFIG_SENDER,
+            to,
+            subject,
+            html: body_text,
+        });
+        return true;
+    } catch (err) {
+        _logger.error(err.stack);
+        return false;
+    }
+};
+
 const send_activation_link = async (customer_id) => {
     const { CstCustomer, EmailTemplate } = getModels();
 
-    // Get customer details using ORM
     const customerData = await CstCustomer.findOne({
         attributes: ['company_name', 'first_name', 'last_name', 'email_id', 'mobile_no', 'register_date', 'is_activated'],
-        where: { customer_id: customer_id }
+        where: { customer_id }
     });
 
-    if (customerData) {
-        if (customerData.is_activated > 0) {
-            return -1;      /* Already activated */
-        } else {
-            const uuid = randomUUID();
-            const uuid_encoded = encodeURIComponent(Buffer.from(uuid.toString(), 'utf8').toString('base64'));
-            let activation_link = process.env.FRONT_SITE_URL + 'verify/' + uuid_encoded;
+    if (!customerData) return 0; // Customer data not found
 
-            // Update customer activation token using ORM
-            const [i] = await CstCustomer.update(
-                { activation_token_id: uuid, activation_token_time: db.get_ist_current_date() },
-                { where: { customer_id: customer_id } }
-            );
-            if (i > 0) {
-                // Get email template using ORM
-                const emailTemplate = await EmailTemplate.findOne({
-                    attributes: ['subject', 'body_text', 'is_enabled'],
-                    where: { template_id: EmailTemplates.ACTIVATION_LINK_AFTER_REG.value }
-                });
-                if (emailTemplate) {
-                    if (emailTemplate.is_enabled) {
-                        let subject = emailTemplate.subject && emailTemplate.subject.length > 0 ? emailTemplate.subject : "";
-                        let body_text = emailTemplate.body_text && emailTemplate.body_text.length > 0 ? emailTemplate.body_text : "";
+    if (customerData.is_activated > 0) return -1; // Already activated
 
-                        subject = subject.replaceAll(process.env.EMAIL_TAG_FIRST_NAME, customerData.first_name);
-                        subject = subject.replaceAll(process.env.EMAIL_TAG_LAST_NAME, customerData.last_name);
-                        subject = subject.replaceAll(process.env.EMAIL_TAG_EMAIL_ID, customerData.email_id);
-                        subject = subject.replaceAll(process.env.EMAIL_TAG_MOBILE_NO, customerData.mobile_no);
-                        subject = subject.replaceAll(process.env.SITE_URL_TAG, process.env.FRONT_SITE_URL);
+    const { uuid, link } = generateActivationLink();
 
-                        body_text = body_text.replaceAll(process.env.EMAIL_TAG_FIRST_NAME, customerData.first_name);
-                        body_text = body_text.replaceAll(process.env.EMAIL_TAG_LAST_NAME, customerData.last_name);
-                        body_text = body_text.replaceAll(process.env.EMAIL_TAG_EMAIL_ID, customerData.email_id);
-                        body_text = body_text.replaceAll(process.env.EMAIL_TAG_MOBILE_NO, customerData.mobile_no);
-                        body_text = body_text.replaceAll(process.env.EMAIL_TAG_ACTIVATION_LINK, activation_link);
-                        body_text = body_text.replaceAll(process.env.SITE_URL_TAG, process.env.FRONT_SITE_URL);
+    const [updateCount] = await CstCustomer.update(
+        { activation_token_id: uuid, activation_token_time: db.get_ist_current_date() },
+        { where: { customer_id } }
+    );
 
-                        let mailOptions = {
-                            from: process.env.EMAIL_CONFIG_SENDER, // sender address
-                            to: customerData.email_id, // list of receivers
-                            subject: subject, // Subject line
-                            html: body_text, // html body
-                        }
-                        let is_success = false;
-                        try {
-                            await emailTransporter.sendMail(mailOptions);
-                            is_success = true;
-                        } catch (err) {
-                            _logger.error(err.stack);
-                        }
-                        if (is_success) {
-                            return 1; /* Send*/
-                        } else {
-                            return 0; /* Sending fail*/
-                        }
-                    } else {
-                        return -4;      /*Templete is disabled*/
-                    }
-                } else {
-                    return -3;      /*Templete not found*/
-                }
-            } else {
-                return -2;     /*Unable to update link uuid*/
-            }
-        }
-    }
-    return 0;       /*Customer data not found*/
+    if (updateCount <= 0) return -2; // Unable to update link uuid
+
+    const emailTemplate = await EmailTemplate.findOne({
+        attributes: ['subject', 'body_text', 'is_enabled'],
+        where: { template_id: EmailTemplates.ACTIVATION_LINK_AFTER_REG.value }
+    });
+
+    if (!emailTemplate) return -3; // Template not found
+    if (!emailTemplate.is_enabled) return -4; // Template is disabled
+
+    const { subject, body_text } = processCustomerEmailTemplate(emailTemplate, customerData, {
+        [process.env.EMAIL_TAG_ACTIVATION_LINK]: link
+    });
+
+    const emailSent = await sendCustomerEmail(customerData.email_id, subject, body_text);
+    return emailSent ? 1 : 0; // 1 = sent, 0 = sending fail
 }
 
 const sendSignUpMail = async (customerId) => {
@@ -707,37 +702,41 @@ const profile_get = async (req, res, next) => {
     }
 };
 
+// Helper to validate profile fields
+const validateProfileFields = (data) => {
+    const { first_name, last_name, network_id, mobile_no, industry_id, company_name } = data;
+
+    if (!first_name?.length) return "Please enter first name.";
+    if (first_name.length > 30) return "First name  should not be more than 30 character";
+    if (!last_name?.length) return "Please enter last name.";
+    if (last_name.length > 30) return "Last name  should not be more than 30 character";
+    if (!network_id || !validator.isNumeric(network_id.toString()) || network_id <= 0) return "Please select country code.";
+    if (!mobile_no?.length) return "Please enter mobile number.";
+    if (!validator.isNumeric(mobile_no) || mobile_no.length !== 10) return "Invalid mobile number.";
+    if (!industry_id || !validator.isNumeric(industry_id.toString()) || industry_id <= 0) return "Please select business category.";
+    if (!company_name?.length) return "Please enter company name.";
+
+    return null;
+};
+
+// Helper to validate password change requirements
+const validatePasswordChange = (old_password, new_password) => {
+    if (!old_password?.length) return "Please enter old password.";
+    if (!new_password?.length) return "Please enter new password.";
+    if (new_password.length < 8) return "The new password must contain atleast 8 characters.";
+    if (!/\d/.test(new_password)) return "The new password must contain a number.";
+    if (!/[`!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?~]/.test(new_password)) return "The new password must contain a special character.";
+    return null;
+};
+
 const profile_set = async (req, res, next) => {
     const { company_name, first_name, last_name, network_id, mobile_no, industry_id } = req.body;
     try {
         const customer_id = req.token_data.customer_id;
 
-        if (!first_name || first_name.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter first name.", null));
-        }
-        if (first_name.length > 30) {
-            return res.status(200).json(success(false, res.statusCode, "First name  should not be more than 30 character", null));
-        }
-        if (!last_name || last_name.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter last name.", null));
-        }
-        if (last_name.length > 30) {
-            return res.status(200).json(success(false, res.statusCode, "Last name  should not be more than 30 character", null));
-        }
-        if (!network_id || !validator.isNumeric(network_id.toString()) || network_id <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please select country code.", null));
-        }
-        if (!mobile_no || mobile_no.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter mobile number.", null));
-        }
-        if ((mobile_no && mobile_no.length > 0 && !validator.isNumeric(mobile_no)) || mobile_no.length != 10) {
-            return res.status(200).json(success(false, res.statusCode, "Invalid mobile number.", null));
-        }
-        if (!industry_id || !validator.isNumeric(industry_id.toString()) || industry_id <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please select business category.", null));
-        }
-        if (!company_name || company_name.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter company name.", null));
+        const validationError = validateProfileFields(req.body);
+        if (validationError) {
+            return res.status(200).json(success(false, res.statusCode, validationError, null));
         }
 
         const { CstCustomer } = getModels();
@@ -792,69 +791,52 @@ const change_password = async (req, res, next) => {
     try {
         const customer_id = req.token_data.customer_id;
 
-        if (!old_password || old_password.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter old password.", null));
-        }
-        if (!new_password || new_password.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter new password.", null));
-        }
-        if (new_password.length < 8) {
-            return res.status(200).json(success(false, res.statusCode, "The new password must contain atleast 8 characters.", null));
-        }
-        const hasNumber = /\d/;
-        if (!hasNumber.test(new_password)) {
-            return res.status(200).json(success(false, res.statusCode, "The new password must contain a number.", null));
-        }
-        const specialChars = /[`!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?~]/;
-        if (!specialChars.test(new_password)) {
-            return res.status(200).json(success(false, res.statusCode, "The new password must contain a special character.", null));
+        const validationError = validatePasswordChange(old_password, new_password);
+        if (validationError) {
+            return res.status(200).json(success(false, res.statusCode, validationError, null));
         }
 
         const { CstCustomer } = getModels();
-
-        // Get customer password using ORM
         const customerData = await CstCustomer.findOne({
             attributes: ['customer_id', 'user_pass'],
             where: { customer_id: customer_id }
         });
-        if (customerData) {
-            const isValidPass = await bcrypt.compare(old_password, customerData.user_pass);
-            if (!isValidPass) {
-                return res.status(200).json(success(false, res.statusCode, "Invalid old password, Please enter correct password.", null));
-            }
 
-            let password_hash = await bcrypt.hash(new_password, 10);
-
-            // Update password using ORM
-            const [i] = await CstCustomer.update(
-                { user_pass: password_hash },
-                { where: { customer_id: customer_id } }
-            );
-            const _query4 = `UPDATE cst_customer SET user_pass`;
-            const _replacements2 = [password_hash, customer_id];
-            if (i > 0) {
-
-                try {
-                    let data_to_log = {
-                        correlation_id: correlator.getId(),
-                        token_id: req.token_data.token_id,
-                        account_id: req.token_data.account_id,
-                        user_type: 2,
-                        user_id: req.token_data.customer_id,
-                        narration: 'Password changed.',
-                        query: db.buildQuery_Array(_query4, _replacements2),
-                        date_time: db.get_ist_current_date(),
-                    }
-                    action_logger.info(JSON.stringify(data_to_log));
-                } catch (_) { }
-
-                return res.status(200).json(success(true, res.statusCode, "Password changed successfully.", null));
-            } else {
-                return res.status(200).json(success(false, res.statusCode, "Unable to update password, Please try again", null));
-            }
-        } else {
+        if (!customerData) {
             return res.status(200).json(success(false, res.statusCode, "Unable to find profile detail, Please try again.", null));
         }
+
+        const isValidPass = await bcrypt.compare(old_password, customerData.user_pass);
+        if (!isValidPass) {
+            return res.status(200).json(success(false, res.statusCode, "Invalid old password, Please enter correct password.", null));
+        }
+
+        const password_hash = await bcrypt.hash(new_password, 10);
+        const [i] = await CstCustomer.update(
+            { user_pass: password_hash },
+            { where: { customer_id: customer_id } }
+        );
+
+        if (i <= 0) {
+            return res.status(200).json(success(false, res.statusCode, "Unable to update password, Please try again", null));
+        }
+
+        try {
+            const _query4 = `UPDATE cst_customer SET user_pass`;
+            const _replacements2 = [password_hash, customer_id];
+            action_logger.info(JSON.stringify({
+                correlation_id: correlator.getId(),
+                token_id: req.token_data.token_id,
+                account_id: req.token_data.account_id,
+                user_type: 2,
+                user_id: req.token_data.customer_id,
+                narration: 'Password changed.',
+                query: db.buildQuery_Array(_query4, _replacements2),
+                date_time: db.get_ist_current_date(),
+            }));
+        } catch (_) { }
+
+        return res.status(200).json(success(true, res.statusCode, "Password changed successfully.", null));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));

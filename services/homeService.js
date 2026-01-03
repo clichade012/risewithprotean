@@ -3,7 +3,7 @@ import db from '../database/db_helper.js';
 import { QueryTypes, Op, literal } from 'sequelize';
 import { success } from "../model/responseModel.js";
 import validator from 'validator';
-import { API_STATUS } from "../model/enumModel.js";
+import { API_STATUS, EmailTemplates } from "../model/enumModel.js";
 import { rsa_decrypt } from "../services/rsaEncryption.js";
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
@@ -13,7 +13,6 @@ import * as customerService from '../services/customerService.js';
 import * as admCustomerService from '../services/admin/admCustomerService.js';
 import { fetch } from 'cross-fetch';
 import { randomUUID } from 'crypto';
-import { EmailTemplates } from "../model/enumModel.js";
 import emailTransporter from "../services/emailService.js";
 import supportTransporter from "../services/supportService.js";
 import DeviceDetector from 'node-device-detector';
@@ -303,7 +302,7 @@ const signup_new = async (req, res, next) => {
         if (!hasNumber.test(password)) {
             return res.status(200).json(success(false, res.statusCode, "The password must contain a number.", null));
         }
-        const specialChars = /[`!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?~]/;
+        const specialChars = /[`!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?~]/;
         if (!specialChars.test(password)) {
             return res.status(200).json(success(false, res.statusCode, "The password must contain a special character.", null));
         }
@@ -412,52 +411,58 @@ const success_get = async (req, res, next) => {
     }
 };
 
+// Helper to decode token safely
+const decodeToken = (token) => {
+    try {
+        return Buffer.from(decodeURIComponent(token), 'base64').toString('utf8');
+    } catch {
+        return '';
+    }
+};
+
+// Helper to check if token is expired
+const isTokenExpired = (tokenTime, expiryMs) => {
+    const expiryDate = new Date(db.convert_db_date_to_ist(tokenTime).getTime() + expiryMs);
+    return expiryDate < db.get_ist_current_date();
+};
+
 const verify_email_link = async (req, res, next) => {
     const { token_id } = req.body;
     try {
         const { CstCustomer } = getModels();
-        let _decoded = '';
-        try {
-            _decoded = Buffer.from(decodeURIComponent(token_id), 'base64').toString('utf8')
-        } catch (e) {
-        }
-        if (_decoded && _decoded.length > 0) {
-            const row4 = await CstCustomer.findOne({
-                attributes: ['customer_id', 'email_id', 'is_enabled', 'is_approved', 'is_activated', 'activation_token_time'],
-                where: { activation_token_id: _decoded, is_deleted: false }
-            });
-            if (row4) {
-                if (row4.is_activated > 0) {
-                    return res.status(200).json(success(false, res.statusCode, "Your account is already activated.", null));
-                }
-                else {
-                    let addMlSeconds = process.env.VERIFICATION_EMAIL_LINK_EXPIRY * 1000;
-                    let newDateObj = new Date(db.convert_db_date_to_ist(row4.activation_token_time).getTime() + addMlSeconds);
-                    if (newDateObj >= db.get_ist_current_date()) {
-                        const [affectedRows] = await CstCustomer.update(
-                            {
-                                is_activated: 1,
-                                activation_token_id: null,
-                                activation_token_time: null,
-                                activated_date: db.get_ist_current_date()
-                            },
-                            { where: { customer_id: row4.customer_id } }
-                        );
-                        if (affectedRows > 0) {
-                            return res.status(200).json(success(true, API_STATUS.CUSTOMER_ACTIVATED.value, "Your account activated successfully, Please login with your email id and password.", null));
-                        } else {
-                            return res.status(200).json(success(false, res.statusCode, "Unable to activate your account, Please try again.", null));
-                        }
-                    } else {
-                        return res.status(200).json(success(false, API_STATUS.ACTIVATION_LINK_EXPIRED.value, "Invalid activation link or expired.", null));
-                    }
-                }
-            } else {
-                return res.status(200).json(success(false, res.statusCode, "Invalid activation link or expired.", null));
-            }
-        } else {
+        const _decoded = decodeToken(token_id);
+
+        if (!_decoded) {
             return res.status(200).json(success(false, res.statusCode, "Invalid activation link or expired.", null));
         }
+
+        const customer = await CstCustomer.findOne({
+            attributes: ['customer_id', 'email_id', 'is_enabled', 'is_approved', 'is_activated', 'activation_token_time'],
+            where: { activation_token_id: _decoded, is_deleted: false }
+        });
+
+        if (!customer) {
+            return res.status(200).json(success(false, res.statusCode, "Invalid activation link or expired.", null));
+        }
+
+        if (customer.is_activated > 0) {
+            return res.status(200).json(success(false, res.statusCode, "Your account is already activated.", null));
+        }
+
+        const expiryMs = process.env.VERIFICATION_EMAIL_LINK_EXPIRY * 1000;
+        if (isTokenExpired(customer.activation_token_time, expiryMs)) {
+            return res.status(200).json(success(false, API_STATUS.ACTIVATION_LINK_EXPIRED.value, "Invalid activation link or expired.", null));
+        }
+
+        const [affectedRows] = await CstCustomer.update(
+            { is_activated: 1, activation_token_id: null, activation_token_time: null, activated_date: db.get_ist_current_date() },
+            { where: { customer_id: customer.customer_id } }
+        );
+
+        if (affectedRows > 0) {
+            return res.status(200).json(success(true, API_STATUS.CUSTOMER_ACTIVATED.value, "Your account activated successfully, Please login with your email id and password.", null));
+        }
+        return res.status(200).json(success(false, res.statusCode, "Unable to activate your account, Please try again.", null));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
@@ -504,113 +509,90 @@ const resend_email_link = async (req, res, next) => {
     }
 };
 
+// Helper to validate login credentials
+const validateLoginCredentials = async (user_name, password, CstCustomer) => {
+    if (!user_name?.length) return { error: "Please enter email id." };
+    if (!password?.length) return { error: "Please enter password." };
+
+    const user = await CstCustomer.findOne({
+        attributes: ['customer_id', 'first_name', 'last_name', 'email_id', 'mobile_no', 'user_pass', 'is_enabled', 'is_deleted',
+            'is_activated', 'is_approved', 'account_id', 'is_live_sandbox', 'billing_type'],
+        where: { email_id: user_name, is_deleted: false }
+    });
+
+    if (!user) return { error: "Invalid username or password." };
+    if (user.is_deleted) return { error: "Your account does not exist." };
+
+    const isValidPass = await bcrypt.compare(password, user.user_pass);
+    if (!isValidPass) return { error: "Invalid username or password." };
+
+    if (user.is_activated <= 0) return { error: "Your account is not activated, Please check your email inbox for activation mail.", code: API_STATUS.CUST_ACC_NOT_ACTIVE.value };
+    if (user.is_approved <= 0) return { error: "Your account is not yet approved, Please contact to administrator.", code: API_STATUS.CUST_ACC_NOT_APPROVED.value };
+    if (!user.is_enabled) return { error: "Your account has been blocked, contact system administrator." };
+
+    return { user };
+};
+
+// Helper to get client info
+const getClientInfo = (req) => {
+    let ip = '';
+    try { ip = requestIp.getClientIp(req); } catch { }
+
+    const user_agent = req.headers['user-agent'];
+    let os_name = '';
+    try { os_name = detector.detect(user_agent).os.name; } catch { }
+
+    return { ip, user_agent, os_name };
+};
+
 const login = async (req, res, next) => {
     const { post_data } = req.body;
     try {
         const { CstCustomer } = getModels();
-        console.log(post_data);
-        let jsonData = JSON.parse(rsa_decrypt(post_data));
+        const jsonData = JSON.parse(rsa_decrypt(post_data));
 
-        let user_name = jsonData.user_name;
-        let password = jsonData.password;
-
-        if (!user_name || user_name.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter email id.", null));
-        }
-        if (!password || password.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter password.", null));
-        }
-        const row1 = await CstCustomer.findOne({
-            attributes: ['customer_id', 'first_name', 'last_name', 'email_id', 'mobile_no', 'user_pass', 'is_enabled', 'is_deleted',
-                'is_activated', 'is_approved', 'account_id', 'is_live_sandbox', 'billing_type'],
-            where: { email_id: user_name, is_deleted: false }
-        });
-        if (!row1) {
-            return res.status(200).json(success(false, res.statusCode, "Invalid username or password.", null));
-        }
-        if (row1.is_deleted) {
-            return res.status(200).json(success(false, res.statusCode, "Your account does not exist.", null));
-        }
-        const isValidPass = await bcrypt.compare(password, row1.user_pass);
-        if (!isValidPass) {
-            return res.status(200).json(success(false, res.statusCode, "Invalid username or password.", null));
-        }
-        if (row1.is_activated <= 0) {
-            return res.status(200).json(success(false, API_STATUS.CUST_ACC_NOT_ACTIVE.value,
-                "Your account is not activated, Please check your email inbox for activation mail.", null));
-        }
-        if (row1.is_approved <= 0) {
-            return res.status(200).json(success(false, API_STATUS.CUST_ACC_NOT_APPROVED.value,
-                "Your account is not yet approved, Please contact to administrator.", null));
-        }
-        if (!row1.is_enabled) {
-            return res.status(200).json(success(false, res.statusCode, "Your account has been blocked, contact system administrator.", null));
+        const validation = await validateLoginCredentials(jsonData.user_name, jsonData.password, CstCustomer);
+        if (validation.error) {
+            return res.status(200).json(success(false, validation.code || res.statusCode, validation.error, null));
         }
 
-        const jwtUser = { id: row1.customer_id }
+        const { user } = validation;
+        const jwtUser = { id: user.customer_id };
         const accessToken = jwt.sign(jwtUser, process.env.JWT_ACCESS_TOKEN_KEY,
-            { algorithm: 'HS256', allowInsecureKeySizes: true, expiresIn: process.env.JWT_ACCESS_TOKEN_EXPIRES * 1000, }
+            { algorithm: 'HS256', allowInsecureKeySizes: true, expiresIn: process.env.JWT_ACCESS_TOKEN_EXPIRES * 1000 }
         );
         const refreshToken = jwt.sign(jwtUser, process.env.JWT_REFRESH_TOKEN_KEY,
-            { algorithm: 'HS256', allowInsecureKeySizes: true, expiresIn: process.env.JWT_REFRESH_TOKEN_EXPIRES * 1000, }
+            { algorithm: 'HS256', allowInsecureKeySizes: true, expiresIn: process.env.JWT_REFRESH_TOKEN_EXPIRES * 1000 }
         );
 
-        let ip = '';
-        try {
-            const clientIp = requestIp.getClientIp(req);
-            ip = clientIp;
-        } catch {
-        }
-
-        let user_agent = req.headers['user-agent'];
-
-        let os_name = '';
-        try {
-            const result = detector.detect(user_agent);
-            os_name = result.os.name;
-        } catch (e) {
-
-        }
+        const { ip, user_agent, os_name } = getClientInfo(req);
 
         const _query2 = `INSERT INTO cst_token(customer_id, added_date, last_action, ip_address, is_logout, logout_time, user_agent, device_name)
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING "token_id", "unique_id"`;
-        const _replacements2 = [row1.customer_id, db.get_ist_current_date(), db.get_ist_current_date(), ip, false, null, user_agent, os_name];
-        const [row2] = await db.sequelize.query(_query2, { replacements: _replacements2, returning: true });
-        const token_id = (row2 && row2.length > 0 && row2[0] ? row2[0].token_id : 0);
-        const unique_id = (row2 && row2.length > 0 && row2[0] ? row2[0].unique_id : "");
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING "unique_id"`;
+        const [row2] = await db.sequelize.query(_query2, {
+            replacements: [user.customer_id, db.get_ist_current_date(), db.get_ist_current_date(), ip, false, null, user_agent, os_name],
+            returning: true
+        });
+        const unique_id = row2?.[0]?.unique_id || "";
+
         if (process.env.REDIS_ENABLED > 0) {
             await redisDB.set(unique_id, refreshToken, { EX: process.env.REDIS_CACHE_EXPIRY });
         }
 
+        res.setHeader('x-auth-key', unique_id);
         const results = {
-            first_name: row1.first_name,
-            last_name: row1.last_name,
-            email_id: row1.email_id,
-            mobile_no: row1.mobile_no,
-            is_live_sandbox: row1.is_live_sandbox,
-            billing_type: row1.billing_type,
+            first_name: user.first_name,
+            last_name: user.last_name,
+            email_id: user.email_id,
+            mobile_no: user.mobile_no,
+            is_live_sandbox: user.is_live_sandbox,
+            billing_type: user.billing_type,
             access_token: accessToken,
             refresh_token: refreshToken,
             token_expiry: process.env.JWT_ACCESS_TOKEN_EXPIRES,
             token_issued_at: dateFormat(process.env.DATE_FORMAT, db.get_ist_current_date()),
             auth_key: unique_id,
         };
-        res.setHeader('x-auth-key', unique_id);
-
-        /*
-        try {
-            let data_to_log = {
-                correlation_id: correlator.getId(),
-                token_id: token_id,
-                account_id: row1.account_id,
-                user_type: 2,
-                user_id: row1.customer_id,
-                narration: 'Logged in.',
-                query: db.buildQuery_Array(_query2, _replacements2),
-            }
-            action_logger.info(JSON.stringify(data_to_log));
-        } catch (_) { }
-        */
 
         return res.status(200).json(success(true, res.statusCode, "Logged in successfully.", results));
     } catch (err) {
@@ -723,105 +705,267 @@ const contact_us_form = async (req, res, next) => {
     }
 };
 
+// Helper to validate contact form
+const validateContactForm = (data) => {
+    const { first_name, last_name, email_id, company_name, category_id, network_id, mobile_no, subject, message } = data;
+
+    if (!first_name?.length) return "Please enter first name.";
+    if (!last_name?.length) return "Please enter last name.";
+    if (!email_id?.length) return "Please enter email address.";
+    if (!validator.isEmail(email_id)) return "Please enter correct email address.";
+    if (!company_name?.length) return "Please enter company name.";
+
+    const _category_id = category_id && validator.isNumeric(category_id.toString()) ? parseInt(category_id) : 0;
+    if (_category_id <= 0) return "Please select issue type.";
+
+    const _network_id = network_id && validator.isNumeric(network_id.toString()) ? parseInt(network_id) : 0;
+    if (_network_id <= 0) return "Please select country code.";
+
+    if (!mobile_no?.length) return "Please enter mobile number.";
+    if (!validator.isNumeric(mobile_no) || mobile_no.length !== 10) return "Please enter correct mobile number.";
+    if (!subject?.length) return "Please enter subject.";
+    if (!message?.length) return "Please enter message.";
+
+    return null;
+};
+
+// Helper to send contact us email
+const sendContactUsEmail = async (template, data, categoryName) => {
+    if (!template?.is_enabled) return;
+
+    let _subject = template.subject || "";
+    let body_text = template.body_text || "";
+
+    _subject = _subject.replaceAll('{{TICKET_ID}}', data.ticket_id);
+    body_text = body_text.replaceAll('{{FULL_NAME}}', `${data.first_name} ${data.last_name}`);
+    body_text = body_text.replaceAll('{{TICKET_ID}}', data.ticket_id);
+    body_text = body_text.replaceAll('{{ISSUE_TYPE}}', categoryName);
+    body_text = body_text.replaceAll('{{SUBJECT}}', data.subject);
+    body_text = body_text.replaceAll('{{MESSAGE}}', data.message);
+    body_text = body_text.replaceAll(process.env.SITE_URL_TAG, process.env.FRONT_SITE_URL);
+
+    try {
+        await supportTransporter.sendMail({
+            from: process.env.EMAIL_SUPPORT_EMAIL,
+            to: data.email_id,
+            subject: _subject,
+            html: body_text,
+        });
+    } catch (err) {
+        _logger.error(err.stack);
+    }
+};
+
+// Helper to generate reset token and update customer
+const generateResetToken = async (customer_id, CstCustomer) => {
+    const uuid = randomUUID();
+    const uuid_encoded = encodeURIComponent(Buffer.from(uuid.toString(), 'utf8').toString('base64'));
+    const resetLink = process.env.FRONT_SITE_URL + 'reset/' + uuid_encoded;
+
+    const [affectedRows] = await CstCustomer.update(
+        { reset_pass_token_id: uuid, reset_pass_token_time: db.get_ist_current_date() },
+        { where: { customer_id } }
+    );
+
+    return { success: affectedRows > 0, resetLink };
+};
+
+// Helper to process reset password email template
+const processResetEmailTemplate = (template, customer, resetLink) => {
+    let subject = template.subject || "";
+    let body_text = template.body_text || "";
+
+    const replacements = {
+        [process.env.EMAIL_TAG_FIRST_NAME]: customer.first_name,
+        [process.env.EMAIL_TAG_LAST_NAME]: customer.last_name,
+        [process.env.EMAIL_TAG_EMAIL_ID]: customer.email_id,
+        [process.env.EMAIL_TAG_MOBILE_NO]: customer.mobile_no,
+        [process.env.EMAIL_TAG_RESET_PASS_LINK]: resetLink,
+        [process.env.SITE_URL_TAG]: process.env.FRONT_SITE_URL,
+    };
+
+    for (const [tag, value] of Object.entries(replacements)) {
+        if (tag) {
+            subject = subject.replaceAll(tag, value);
+            body_text = body_text.replaceAll(tag, value);
+        }
+    }
+
+    return { subject, body_text };
+};
+
+// Helper to send reset password email
+const sendResetPasswordEmail = async (customer, subject, body_text) => {
+    try {
+        await emailTransporter.sendMail({
+            from: process.env.EMAIL_CONFIG_SENDER,
+            to: customer.email_id,
+            subject,
+            html: body_text,
+        });
+        return true;
+    } catch (err) {
+        console.log(err);
+        _logger.error(err.stack);
+        return false;
+    }
+};
+
+// Helper to parse common pagination parameters
+const parsePageParams = (params) => {
+    const { page_no, filter_id, search_text, grid_type, category_id } = params;
+    return {
+        page_no: (page_no && validator.isNumeric(page_no.toString()) && parseInt(page_no) > 0) ? parseInt(page_no) : 1,
+        filter_id: (filter_id && filter_id > 0) ? filter_id : 0,
+        search_text: (search_text?.length > 0) ? search_text : "",
+        grid_type: (grid_type && grid_type > 0) ? grid_type : 0,
+        category_id: (category_id && validator.isNumeric(category_id.toString())) ? parseInt(category_id) : 0,
+    };
+};
+
+// Helper to get product_id from proxy
+const getProductIdFromProxy = async (proxy_id) => {
+    const query = `SELECT product_id FROM proxies WHERE proxy_id = ?`;
+    const rows = await db.sequelize.query(query, { replacements: [proxy_id], type: QueryTypes.SELECT });
+    return rows?.[0]?.product_id || null;
+};
+
+// Helper to format catalog item
+const formatCatalogItem = (e, product_id, req) => {
+    const product_icon = e.product_icon?.length > 0 ? e.product_icon : db.get_uploads_url(req) + 'defaultIcon.png';
+    return {
+        sr_no: e.sr_no,
+        endpoint_id: e.endpoint_id,
+        product_id,
+        proxy_id: e.proxy_id,
+        name: e.display_name,
+        url: e.endpoint_url,
+        description: e.description,
+        methods: e.methods,
+        product_name: e.product_name,
+        display_name: e.product_display_name,
+        is_published: e.is_published,
+        added_date: e.added_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(e.added_date)) : "",
+        product_note: e.product_note,
+        redirect_url: e.redirect_url,
+        is_manual: e.is_manual,
+        product_icon,
+    };
+};
+
+// Helper to format endpoint item
+const formatEndpointItem = (e) => ({
+    endpoint_id: e.endpoint_id,
+    name: e.display_name,
+    url: e.endpoint_url,
+    description: e.description,
+    methods: e.methods,
+    icon_url: '',
+    is_manual: e.is_manual,
+    redirect_url: e.redirect_url,
+});
+
+// Helper to get endpoints by product_id
+const getEndpointsByProductId = async (product_id) => {
+    const query = `SELECT endpoint_id, product_id, endpoint_url, display_name, description, methods, is_manual, redirect_url FROM endpoint
+        WHERE product_id = ? AND is_deleted = false AND is_product_published = true
+        ORDER BY CASE WHEN COALESCE(sort_order, 0) <= 0 THEN 9223372036854775807 ELSE COALESCE(sort_order, 0) END, endpoint_id`;
+    return await db.sequelize.query(query, { replacements: [product_id], type: QueryTypes.SELECT });
+};
+
+// Helper to get endpoints via proxies
+const getEndpointsViaProxies = async (product_id) => {
+    const proxyQuery = `SELECT proxy_id FROM proxies WHERE product_id = ? AND is_deleted = false AND is_published = true`;
+    const proxies = await db.sequelize.query(proxyQuery, { replacements: [product_id], type: QueryTypes.SELECT });
+
+    const endpoints = [];
+    for (const proxy of proxies || []) {
+        const endpointQuery = `SELECT endpoint_id, endpoint_url, display_name, description, methods, is_manual, redirect_url FROM endpoint
+            WHERE proxy_id = ? AND is_deleted = false AND is_product_published = true
+            ORDER BY CASE WHEN COALESCE(sort_order, 0) <= 0 THEN 9223372036854775807 ELSE COALESCE(sort_order, 0) END, endpoint_id`;
+        const proxyEndpoints = await db.sequelize.query(endpointQuery, { replacements: [proxy.proxy_id], type: QueryTypes.SELECT });
+        endpoints.push(...(proxyEndpoints || []));
+    }
+    return endpoints;
+};
+
+// Helper to get all endpoints for a product
+const getEndpointsForProduct = async (product_id) => {
+    const directEndpoints = await getEndpointsByProductId(product_id);
+    if (directEndpoints?.length > 0) {
+        return directEndpoints.map(formatEndpointItem);
+    }
+    const proxyEndpoints = await getEndpointsViaProxies(product_id);
+    return proxyEndpoints.map(formatEndpointItem);
+};
+
+// Helper to format product item
+const formatProductItem = async (p, req) => {
+    const endpoints_list = await getEndpointsForProduct(p.product_id);
+    const product_icon = p.product_icon?.length > 0 ? p.product_icon : db.get_uploads_url(req) + 'defaultIcon.png';
+
+    return {
+        product_id: p.product_id,
+        product_name: p.product_name,
+        display_name: p.display_name,
+        is_published: p.is_published,
+        description: p.description,
+        page_text: p.page_text,
+        key_features: p.key_features,
+        flow_chart: p.flow_chart,
+        added_date: p.added_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(p.added_date)) : "",
+        modify_date: p.modify_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(p.modify_date)) : "",
+        proxy_count: p.proxy_count,
+        product_note: p.product_note,
+        product_icon,
+        endpoints_list,
+    };
+};
+
 const contact_us_save = async (req, res, next) => {
     const { first_name, last_name, email_id, company_name, category_id, network_id, mobile_no, subject, message } = req.body;
     try {
+        const validationError = validateContactForm(req.body);
+        if (validationError) {
+            return res.status(200).json(success(false, res.statusCode, validationError, null));
+        }
+
         const { FeedbackCategory, EmailTemplate } = getModels();
-        if (!first_name || first_name.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter first name.", null));
-        }
-        if (!last_name || last_name.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter last name.", null));
-        }
-        if (!email_id || email_id.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter email address.", null));
-        }
-        if (email_id && email_id.length > 0 && !validator.isEmail(email_id)) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter correct email address.", null));
-        }
-        if (!company_name || company_name.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter company name.", null));
-        }
-        let _category_id = category_id && validator.isNumeric(category_id.toString()) ? parseInt(category_id) : 0;
-        if (_category_id <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please select issue type.", null));
-        }
-        let _network_id = network_id && validator.isNumeric(network_id.toString()) ? parseInt(network_id) : 0;
-        if (_network_id <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please select country code.", null));
-        }
-        if (!mobile_no || mobile_no.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter mobile number.", null));
-        }
-        if ((mobile_no && mobile_no.length > 0 && !validator.isNumeric(mobile_no)) || mobile_no.length != 10) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter correct mobile number.", null));
-        }
-        if (!subject || subject.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter subject.", null));
-        }
-        if (!message || message.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter message.", null));
-        }
+        const _category_id = parseInt(category_id);
+        const _network_id = parseInt(network_id);
+
         const _query1 = `INSERT INTO feedback_data(first_name, last_name, email_id, company_name, category_id, network_id, mobile_no,
              subject, message, is_deleted, added_date, ticket_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (NEXTVAL('feedback_ticket_id_sequence') * 100 + currval('feedback_ticket_id_sequence'))) RETURNING "feedback_id" , "ticket_id"`;
-        const _replacements2 = [first_name, last_name, email_id, company_name, _category_id, _network_id, mobile_no, subject, message, false, db.get_ist_current_date()];
-        const [row1] = await db.sequelize.query(_query1, { replacements: _replacements2, type: QueryTypes.INSERT });
-        console.log(row1);
-        const feedback_id = (row1 && row1.length > 0 && row1[0] ? row1[0].feedback_id : 0);
-        const ticket_id = (row1 && row1.length > 0 && row1[0] ? row1[0].ticket_id : 0);
-        if (feedback_id > 0) {
-            const row2 = await FeedbackCategory.findOne({
-                attributes: ['category_id', 'category_name'],
-                where: { is_enabled: true, is_deleted: false, category_id: _category_id }
-            });
-            if (!row2) {
-                return res.status(200).json(success(false, res.statusCode, "Contact us category not found.", null));
-            }
+        const [row1] = await db.sequelize.query(_query1, {
+            replacements: [first_name, last_name, email_id, company_name, _category_id, _network_id, mobile_no, subject, message, false, db.get_ist_current_date()],
+            type: QueryTypes.INSERT
+        });
 
-            const rowT = await EmailTemplate.findOne({
-                attributes: ['subject', 'body_text', 'is_enabled'],
-                where: { template_id: EmailTemplates.CONTACT_US_REPLY.value }
-            });
-            if (rowT) {
-                if (rowT.is_enabled) {
-                    let _subject = rowT.subject && rowT.subject.length > 0 ? rowT.subject : "";
-                    let body_text = rowT.body_text && rowT.body_text.length > 0 ? rowT.body_text : "";
+        const feedback_id = row1?.[0]?.feedback_id || 0;
+        const ticket_id = row1?.[0]?.ticket_id || 0;
 
-                    _subject = _subject.replaceAll('{{TICKET_ID}}', ticket_id);
-
-                    body_text = body_text.replaceAll('{{FULL_NAME}}', first_name + ' ' + last_name);
-                    body_text = body_text.replaceAll('{{TICKET_ID}}', ticket_id);
-                    body_text = body_text.replaceAll('{{ISSUE_TYPE}}', row2.category_name);
-                    body_text = body_text.replaceAll('{{SUBJECT}}', subject);
-                    body_text = body_text.replaceAll('{{MESSAGE}}', message);
-                    body_text = body_text.replaceAll(process.env.SITE_URL_TAG, process.env.FRONT_SITE_URL);
-                    let mailOptions = {
-                        from: process.env.EMAIL_SUPPORT_EMAIL, // sender address
-                        to: email_id, // list of receivers
-                        subject: _subject, // Subject line
-                        html: body_text, // html body
-                    }
-                    let is_success = false;
-                    try {
-                        await supportTransporter.sendMail(mailOptions);
-                        is_success = true;
-                    } catch (err) {
-                        _logger.error(err.stack);
-                    }
-                    return res.status(200).json(success(true, res.statusCode, "Your message submitted successfully.", null));
-                } else {
-                    return res.status(200).json(success(true, res.statusCode, "Your message submitted successfully.", null));
-                }
-            }
-            else {
-                return res.status(200).json(success(true, res.statusCode, "Your message submitted successfully.", null));
-            }
-        }
-        else {
+        if (feedback_id <= 0) {
             return res.status(200).json(success(false, res.statusCode, "Unable to save your feedback, Please try again.", null));
         }
-    }
-    catch (err) {
+
+        const category = await FeedbackCategory.findOne({
+            attributes: ['category_name'],
+            where: { is_enabled: true, is_deleted: false, category_id: _category_id }
+        });
+
+        if (!category) {
+            return res.status(200).json(success(false, res.statusCode, "Contact us category not found.", null));
+        }
+
+        const template = await EmailTemplate.findOne({
+            attributes: ['subject', 'body_text', 'is_enabled'],
+            where: { template_id: EmailTemplates.CONTACT_US_REPLY.value }
+        });
+
+        await sendContactUsEmail(template, { first_name, last_name, email_id, subject, message, ticket_id }, category.category_name);
+
+        return res.status(200).json(success(true, res.statusCode, "Your message submitted successfully.", null));
+    } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
     }
@@ -831,80 +975,37 @@ const send_reset_link = async (req, res, next) => {
     const { email } = req.body;
     try {
         const { CstCustomer, EmailTemplate } = getModels();
-        const row4 = await CstCustomer.findOne({
+        const customer = await CstCustomer.findOne({
             where: { email_id: email, is_deleted: false }
         });
-        if (row4) {
-            const customer_id = row4.customer_id;
-            const uuid = randomUUID();
-            const uuid_encoded = encodeURIComponent(Buffer.from(uuid.toString(), 'utf8').toString('base64'));
-            let activation_link = process.env.FRONT_SITE_URL + 'reset/' + uuid_encoded;
-            console.log(activation_link);
 
-            const [i] = await CstCustomer.update(
-                {
-                    reset_pass_token_id: uuid,
-                    reset_pass_token_time: db.get_ist_current_date()
-                },
-                { where: { customer_id: customer_id } }
-            );
-            if (i > 0) {
-                const rowT = await EmailTemplate.findOne({
-                    attributes: ['subject', 'body_text', 'is_enabled'],
-                    where: { template_id: EmailTemplates.ACTIVATION_LINK_RESET_PASS.value }
-                });
-                if (rowT) {
-                    if (rowT.is_enabled) {
-                        let subject = rowT.subject && rowT.subject.length > 0 ? rowT.subject : "";
-                        let body_text = rowT.body_text && rowT.body_text.length > 0 ? rowT.body_text : "";
-
-                        subject = subject.replaceAll(process.env.EMAIL_TAG_FIRST_NAME, row4.first_name);
-                        subject = subject.replaceAll(process.env.EMAIL_TAG_LAST_NAME, row4.last_name);
-                        subject = subject.replaceAll(process.env.EMAIL_TAG_EMAIL_ID, row4.email_id);
-                        subject = subject.replaceAll(process.env.EMAIL_TAG_MOBILE_NO, row4.mobile_no);
-                        subject = subject.replaceAll(process.env.SITE_URL_TAG, process.env.FRONT_SITE_URL);
-
-                        body_text = body_text.replaceAll(process.env.EMAIL_TAG_FIRST_NAME, row4.first_name);
-                        body_text = body_text.replaceAll(process.env.EMAIL_TAG_LAST_NAME, row4.last_name);
-                        body_text = body_text.replaceAll(process.env.EMAIL_TAG_EMAIL_ID, row4.email_id);
-                        body_text = body_text.replaceAll(process.env.EMAIL_TAG_MOBILE_NO, row4.mobile_no);
-                        body_text = body_text.replaceAll(process.env.EMAIL_TAG_RESET_PASS_LINK, activation_link);
-                        body_text = body_text.replaceAll(process.env.SITE_URL_TAG, process.env.FRONT_SITE_URL);
-                        body_text = body_text.replaceAll(process.env.SITE_URL_TAG, process.env.FRONT_SITE_URL);
-                        body_text = body_text.replaceAll(process.env.SITE_URL_TAG, process.env.FRONT_SITE_URL);
-                        body_text = body_text.replaceAll(process.env.SITE_URL_TAG, process.env.FRONT_SITE_URL);
-
-                        let mailOptions = {
-                            from: process.env.EMAIL_CONFIG_SENDER, // sender address
-                            to: row4.email_id, // list of receivers
-                            subject: subject, // Subject line
-                            html: body_text, // html body
-                        }
-                        let is_success = false;
-                        try {
-                            await emailTransporter.sendMail(mailOptions);
-                            is_success = true;
-                        } catch (err) {
-                            console.log(err);
-                            _logger.error(err.stack);
-                        }
-                        if (is_success) {
-                            return res.status(200).json(success(true, res.statusCode, "Reset password link has been sent on your email address.", null));
-                        } else {
-                            return res.status(200).json(success(false, res.statusCode, "Unable to send reset password link.", null));
-                        }
-                    } else {
-                        return res.status(200).json(success(false, res.statusCode, "Unable to generate reset password link.", null));
-                    }
-                } else {
-                    return res.status(200).json(success(false, res.statusCode, "Unable to generate reset password link.", null));
-                }
-            } else {
-                return res.status(200).json(success(false, res.statusCode, "Unable to generate reset password link.", null));
-            }
-        } else {
+        if (!customer) {
             return res.status(200).json(success(false, res.statusCode, "Email address is not registered with us.", null));
         }
+
+        const tokenResult = await generateResetToken(customer.customer_id, CstCustomer);
+        if (!tokenResult.success) {
+            return res.status(200).json(success(false, res.statusCode, "Unable to generate reset password link.", null));
+        }
+
+        console.log(tokenResult.resetLink);
+
+        const template = await EmailTemplate.findOne({
+            attributes: ['subject', 'body_text', 'is_enabled'],
+            where: { template_id: EmailTemplates.ACTIVATION_LINK_RESET_PASS.value }
+        });
+
+        if (!template?.is_enabled) {
+            return res.status(200).json(success(false, res.statusCode, "Unable to generate reset password link.", null));
+        }
+
+        const { subject, body_text } = processResetEmailTemplate(template, customer, tokenResult.resetLink);
+        const emailSent = await sendResetPasswordEmail(customer, subject, body_text);
+
+        if (emailSent) {
+            return res.status(200).json(success(true, res.statusCode, "Reset password link has been sent on your email address.", null));
+        }
+        return res.status(200).json(success(false, res.statusCode, "Unable to send reset password link.", null));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
@@ -928,7 +1029,7 @@ const verify_reset_pass = async (req, res, next) => {
         if (!hasNumber.test(password)) {
             return res.status(200).json(success(false, res.statusCode, "The password must contain a number.", null));
         }
-        const specialChars = /[`!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?~]/;
+        const specialChars = /[`!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?~]/;
         if (!specialChars.test(password)) {
             return res.status(200).json(success(false, res.statusCode, "The password must contain a special character.", null));
         }
@@ -1002,14 +1103,10 @@ const reset_link_check = async (req, res, next) => {
 };
 
 const catalog_get = async (req, res, next) => {
-    const { page_no, filter_id, search_text, grid_type, category_id } = req.body;
     try {
-        let _page_no = page_no && validator.isNumeric(page_no.toString()) ? parseInt(page_no) : 0;
-        if (_page_no <= 0) { _page_no = 1; }
-        let _search_text = search_text && search_text.length > 0 ? search_text : "";
-        let _filter_id = filter_id && filter_id > 0 ? filter_id : 0;
-        let _grid_type = grid_type && grid_type > 0 ? grid_type : 0;
-        let categoryId = category_id && validator.isNumeric(category_id.toString()) ? parseInt(category_id) : 0;
+        const params = parsePageParams(req.body);
+        const searchPattern = "%" + params.search_text + "%";
+
         const _query0 = `SELECT count(1) AS total_record
           FROM endpoint e INNER JOIN proxies s ON e.proxy_id = s.proxy_id INNER JOIN product p on s.product_id = p.product_id
           WHERE e.is_published = true AND e.is_deleted = false AND s.is_deleted = false
@@ -1019,17 +1116,10 @@ const catalog_get = async (req, res, next) => {
           END AND (:categoryId = 0 OR e.category_id = :categoryId)`;
 
         const row0 = await db.sequelize.query(_query0, {
-            replacements: {
-                search_text: "%" + _search_text + "%",
-                filter_id: _filter_id,
-                categoryId: categoryId,
-            },
+            replacements: { search_text: searchPattern, filter_id: params.filter_id, categoryId: params.category_id },
             type: QueryTypes.SELECT,
         });
-        let total_record = 0;
-        if (row0 && row0.length > 0) {
-            total_record = row0[0].total_record;
-        }
+        const total_record = row0?.[0]?.total_record || 0;
 
         const _query1 = `SELECT ROW_NUMBER() OVER (ORDER BY CASE WHEN COALESCE(p.sort_order, 0) <= 0 THEN 9223372036854775807 ELSE COALESCE(p.sort_order, 0) END, e.sort_order) AS sr_no,
         e.endpoint_id, e.proxy_id, e.product_id, e.endpoint_url, e.display_name, e.description, e.added_date, p.product_name, p.product_icon,p.product_note, p.display_name as product_display_name,
@@ -1041,55 +1131,27 @@ const catalog_get = async (req, res, next) => {
         ELSE (LOWER(p.product_name) LIKE LOWER(:search_text)  OR LOWER(e.display_name) LIKE LOWER(:search_text))
         END ORDER BY CASE WHEN COALESCE(p.sort_order, 0) <= 0 THEN 9223372036854775807 ELSE COALESCE(p.sort_order, 0) END, e.sort_order
         LIMIT CASE WHEN :grid_type = 3 THEN :page_size  ELSE 9223372036854775807 END OFFSET CASE WHEN :grid_type = 3 THEN ((:page_no - 1) * :page_size) ELSE 0 END`;
-        //   LIMIT :page_size OFFSET ((:page_no - 1) * :page_size)
+
         const row1 = await db.sequelize.query(_query1, {
             replacements: {
-                search_text: "%" + _search_text + "%",
+                search_text: searchPattern,
                 page_size: process.env.PAGINATION_SIZE,
-                page_no: _page_no,
-                filter_id: _filter_id,
-                grid_type: _grid_type,
-                categoryId: categoryId,
-
+                page_no: params.page_no,
+                filter_id: params.filter_id,
+                grid_type: params.grid_type,
+                categoryId: params.category_id,
             },
             type: QueryTypes.SELECT,
         });
-        let list = [];
-        if (row1) {
-            for (const e of row1) {
-                let product_id = e.product_id;
-                if (!product_id || product_id == null) {
-                    const _query3 = `SELECT proxy_id, product_id, proxy_name FROM proxies WHERE proxy_id = ?`;
-                    const row3 = await db.sequelize.query(_query3, { replacements: [e.proxy_id], type: QueryTypes.SELECT });
-                    if (row3 && row3.length > 0) {
-                        product_id = row3[0].product_id;
-                    }
-                }
-                let product_icon = e.product_icon && e.product_icon.length > 0 ? e.product_icon : db.get_uploads_url(req) + 'defaultIcon.png';
-                list.push({
-                    sr_no: e.sr_no,
-                    endpoint_id: e.endpoint_id,
-                    product_id: product_id,
-                    proxy_id: e.proxy_id,
-                    name: e.display_name,
-                    url: e.endpoint_url,
-                    description: e.description,
-                    methods: e.methods,
-                    product_name: e.product_name,
-                    display_name: e.product_display_name,
-                    is_published: e.is_published,
-                    added_date: e.added_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(e.added_date)) : "",
-                    product_note: e.product_note,
-                    redirect_url: e.redirect_url,
-                    is_manual: e.is_manual,
-                    product_icon: product_icon,
-                });
-            }
-        }
+
+        const list = await Promise.all((row1 || []).map(async (e) => {
+            const product_id = e.product_id || await getProductIdFromProxy(e.proxy_id);
+            return formatCatalogItem(e, product_id, req);
+        }));
 
         const results = {
-            current_page: _page_no,
-            total_record: total_record,
+            current_page: params.page_no,
+            total_record,
             total_pages: Math.ceil(total_record / process.env.PAGINATION_SIZE),
             data: list,
         };
@@ -1161,26 +1223,21 @@ const terms_condition = async (req, res, next) => {
 
 
 const product_get = async (req, res, next) => {
-    const { page_no, filter_id, search_text, category_id } = req.body;
     try {
-        let _page_no = page_no && validator.isNumeric(page_no.toString()) ? parseInt(page_no) : 0;
-        if (_page_no <= 0) { _page_no = 1; }
-        let _search_text = search_text && search_text.length > 0 ? search_text : "";
-        let _filter_id = filter_id && filter_id > 0 ? filter_id : 0;
-        let categoryId = category_id && validator.isNumeric(category_id.toString()) ? parseInt(category_id) : 0;
+        const params = parsePageParams(req.body);
+        const searchPattern = "%" + params.search_text + "%";
+
         const _query0 = `SELECT count(1) AS total_record
           FROM product p where p.is_product_published = true AND is_deleted = false AND CASE WHEN :filter_id = 1 THEN added_date BETWEEN (CURRENT_DATE - INTERVAL '7 days') AND CURRENT_DATE
           ELSE (LOWER(p.product_name) LIKE LOWER(:search_text) OR (LOWER(p.display_name) LIKE LOWER(:search_text)) OR  LOWER(p.description)  LIKE LOWER(:search_text))
        END  AND (:categoryId = 0 OR p.category_id = :categoryId) `;
+
         const row0 = await db.sequelize.query(_query0, {
-            replacements: {
-                search_text: "%" + _search_text + "%",
-                filter_id: _filter_id,
-                categoryId: categoryId,
-            },
+            replacements: { search_text: searchPattern, filter_id: params.filter_id, categoryId: params.category_id },
             type: QueryTypes.SELECT,
         });
         const total_record = row0?.[0]?.total_record || 0;
+
         const _query1 = `SELECT  p.product_id, p.unique_id, p.product_name, p.display_name, p.is_published,p.description, p.page_text,
           p.key_features, p.flow_chart, p.added_date, p.modify_date, p.added_by, p.modify_by, p.product_icon,p.product_note,
           (SELECT COUNT(*) FROM proxies pp WHERE pp.product_id = p.product_id) AS proxy_count,
@@ -1191,88 +1248,23 @@ const product_get = async (req, res, next) => {
           OR LOWER(p.description) LIKE LOWER(:search_text))
           END ORDER BY CASE WHEN COALESCE(p.sort_order, 0) <= 0 THEN 9223372036854775807 ELSE COALESCE(p.sort_order, 0) END,
           endpoint_count DESC LIMIT :page_size OFFSET ((:page_no - 1) * :page_size)`;
+
         const row1 = await db.sequelize.query(_query1, {
             replacements: {
-                search_text: "%" + _search_text + "%",
-                // page_size: process.env.PAGINATION_SIZE,
+                search_text: searchPattern,
                 page_size: 1000,
-                page_no: _page_no,
-                filter_id: _filter_id,
-                categoryId: categoryId,
+                page_no: params.page_no,
+                filter_id: params.filter_id,
+                categoryId: params.category_id,
             },
             type: QueryTypes.SELECT,
         });
-        let product_list = [];
-        if (row1) {
-            for (const p of row1) {
-                let endpoints_list = [];
-                const _query4 = `SELECT endpoint_id, product_id, endpoint_url, display_name, description, methods, is_manual, redirect_url FROM endpoint
-                        WHERE product_id = ? AND is_deleted = false AND is_product_published = true
-                        ORDER BY CASE WHEN COALESCE(sort_order, 0) <= 0 THEN 9223372036854775807 ELSE COALESCE(sort_order, 0) END, endpoint_id`;
-                const row4 = await db.sequelize.query(_query4, { replacements: [p.product_id], type: QueryTypes.SELECT });
-                if (row4 && row4.length > 0) {
-                    for (const e of row4) {
-                        endpoints_list.push({
-                            endpoint_id: e.endpoint_id,
-                            name: e.display_name,
-                            url: e.endpoint_url,
-                            description: e.description,
-                            methods: e.methods,
-                            icon_url: '',
-                            is_manual: e.is_manual,
-                            redirect_url: e.redirect_url,
-                        });
-                    }
-                } else {
-                    const _query3 = `SELECT proxy_id, proxy_name FROM proxies WHERE product_id = ? AND is_deleted = false AND is_published = true`;
-                    const row3 = await db.sequelize.query(_query3, { replacements: [p.product_id], type: QueryTypes.SELECT });
-                    if (row3) {
-                        for (const item of row3) {
-                            const _query4 = `SELECT endpoint_id, endpoint_url, display_name, description, methods, is_manual, redirect_url FROM endpoint
-                            WHERE proxy_id = ? AND is_deleted = false AND is_product_published = true
-                            ORDER BY CASE WHEN COALESCE(sort_order, 0) <= 0 THEN 9223372036854775807 ELSE COALESCE(sort_order, 0) END, endpoint_id`;
-                            const row4 = await db.sequelize.query(_query4, { replacements: [item.proxy_id], type: QueryTypes.SELECT });
-                            if (row4) {
-                                for (const e of row4) {
-                                    endpoints_list.push({
-                                        endpoint_id: e.endpoint_id,
-                                        name: e.display_name,
-                                        url: e.endpoint_url,
-                                        description: e.description,
-                                        methods: e.methods,
-                                        icon_url: '',
-                                        is_manual: e.is_manual,
-                                        redirect_url: e.redirect_url,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
 
-                let product_icon = p.product_icon && p.product_icon.length > 0 ? p.product_icon : db.get_uploads_url(req) + 'defaultIcon.png';
-                product_list.push({
-                    product_id: p.product_id,
-                    product_name: p.product_name,
-                    display_name: p.display_name,
-                    is_published: p.is_published,
-                    description: p.description,
-                    page_text: p.page_text,
-                    key_features: p.key_features,
-                    flow_chart: p.flow_chart,
-                    added_date: p.added_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(p.added_date)) : "",
-                    modify_date: p.modify_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(p.modify_date)) : "",
-                    proxy_count: p.proxy_count,
-                    product_note: p.product_note,
-                    product_icon: product_icon,
-                    endpoints_list: endpoints_list,
-                });
-            }
-        }
+        const product_list = await Promise.all((row1 || []).map(p => formatProductItem(p, req)));
 
         const results = {
-            current_page: _page_no,
-            total_record: total_record,
+            current_page: params.page_no,
+            total_record,
             total_pages: Math.ceil(total_record / process.env.PAGINATION_SIZE),
             data: product_list,
         };
