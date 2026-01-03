@@ -2555,15 +2555,64 @@ const calculateExcelExportDates = (from_date, upto_date) => {
     };
 };
 
+// Helper to parse export request params
+const parseExportParams = (body) => {
+    const { page_no, search_text, type } = body;
+    return {
+        _search_text: search_text?.length ? search_text : "",
+        _page_no: Math.max(1, parseNumericId(page_no) || 1),
+        _type: parseNumericId(type) || 1
+    };
+};
+
+// Helper to get table name by type
+const getTableNameByType = (type) => type === 1 ? 'apigee_logs_prod' : 'apigee_logs';
+
+// Helper to format export row data
+const formatExportRowData = (row) => [
+    row.sr_no,
+    row.dc_developer_email,
+    row.developer,
+    row.dc_api_product,
+    row.dc_api_request_id,
+    row.dc_api_name,
+    row.dc_case_id,
+    row.request_path,
+    row.response_status_code,
+    row.id_field_from_signzy_response || '',
+    row.total_response_time,
+    row.karza_status_code || '',
+    row.response_description || '',
+    row.target_sent_start_timestamp,
+    row.target_received_end_timestamp,
+    db.convertUTCtoIST(row.target_sent_start_timestamp),
+    db.convertUTCtoIST(row.target_received_end_timestamp),
+    row.x_apigee_mintng_price_multiplier,
+    row.x_apigee_mintng_rate,
+    row.rate_plan_rate,
+];
+
+// Helper to build export query
+const buildExportQuery = (table_name, conditions) => {
+    let query = `SELECT ROW_NUMBER() OVER(ORDER BY id DESC) AS sr_no,
+        id, organization, environment, apiproxy, request_uri, proxy, proxy_basepath,request_path, request_verb, request_size, response_status_code,
+        is_error, client_received_start_timestamp, client_received_end_timestamp, target_sent_start_timestamp, target_sent_end_timestamp,
+        target_received_start_timestamp, target_received_end_timestamp, client_sent_start_timestamp, client_sent_end_timestamp, client_ip,
+        client_id, REPLACE(developer, 'apigeeprotean@@@', '') AS developer, developer_app, api_product, response_size, developer_email,
+        total_response_time, request_processing_latency, response_processing_latency, ax_created_time, dc_api_product, dc_api_resource,
+        dc_developer_app, dc_developer_app_display_name, dc_developer_email, dc_api_name, dc_api_request_id, dc_case_id,
+        x_apigee_mintng_price_multiplier, x_apigee_mintng_rate, x_apigee_mintng_rate::FLOAT /NULLIF(x_apigee_mintng_price_multiplier::FLOAT , 0) as rate_plan_rate
+        FROM ${table_name}`;
+    if (conditions.length > 0) query += ' WHERE ' + conditions.join(' AND ');
+    query += ` LIMIT :page_size OFFSET ((:page_no - 1) * :page_size)`;
+    return query;
+};
+
 const analytics_reports_export = async (req, res, next) => {
-    const { page_no, search_text, product_id, from_date, upto_date, type } = req.body;
+    const { product_id, from_date, upto_date } = req.body;
     try {
         const _customer_id = req.token_data.customer_id;
-        const _search_text = search_text?.length ? search_text : "";
-        let _page_no = page_no && validator.isNumeric(page_no.toString()) ? parseInt(page_no) : 0;
-        let _type = type && validator.isNumeric(type.toString()) ? parseInt(type) : 0;
-        if (_page_no <= 0) _page_no = 1;
-        if (_type <= 0) _type = 1;
+        const { _search_text, _page_no, _type } = parseExportParams(req.body);
 
         if (_customer_id <= 0 || (product_id && product_id.length <= 0)) {
             const dateValidation = validateAnalyticsDateRange(from_date, upto_date);
@@ -2573,8 +2622,8 @@ const analytics_reports_export = async (req, res, next) => {
         }
 
         const { _from_date, _upto_date } = calculateExcelExportDates(from_date, upto_date);
-        const table_name = _type == 1 ? 'apigee_logs_prod' : 'apigee_logs';
-        let currentPage = page_no && validator.isNumeric(page_no.toString()) ? parseInt(page_no) : 1;
+        const table_name = getTableNameByType(_type);
+        let currentPage = _page_no;
         const pageSize = 1000;
 
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
@@ -2593,46 +2642,12 @@ const analytics_reports_export = async (req, res, next) => {
 
         let hasMoreData = true;
         while (hasMoreData) {
-            let _query3 = `SELECT ROW_NUMBER() OVER(ORDER BY id DESC) AS sr_no,
-        id, organization, environment, apiproxy, request_uri, proxy, proxy_basepath,request_path, request_verb, request_size, response_status_code,
-        is_error, client_received_start_timestamp, client_received_end_timestamp, target_sent_start_timestamp, target_sent_end_timestamp,
-        target_received_start_timestamp, target_received_end_timestamp, client_sent_start_timestamp, client_sent_end_timestamp, client_ip,
-        client_id, REPLACE(developer, 'apigeeprotean@@@', '') AS developer, developer_app, api_product, response_size, developer_email,
-        total_response_time, request_processing_latency, response_processing_latency, ax_created_time, dc_api_product, dc_api_resource,
-        dc_developer_app, dc_developer_app_display_name, dc_developer_email, dc_api_name, dc_api_request_id, dc_case_id,
-        x_apigee_mintng_price_multiplier, x_apigee_mintng_rate, x_apigee_mintng_rate::FLOAT /NULLIF(x_apigee_mintng_price_multiplier::FLOAT , 0) as rate_plan_rate
-        FROM ${table_name} `;
-            if (conditions.length > 0) _query3 += ' WHERE ' + conditions.join(' AND ');
-            _query3 += ` LIMIT :page_size OFFSET ((:page_no - 1) * :page_size)`;
-
+            const _query3 = buildExportQuery(table_name, conditions);
             const replacements = { ...baseReplacements, page_size: pageSize, page_no: currentPage };
             const pageData = await db.sequelize2.query(_query3, { replacements, type: QueryTypes.SELECT, raw: true });
-            if (pageData && pageData.length > 0) {
-                pageData.forEach(row => {
-                    const rowData = [
-                        row.sr_no,
-                        row.dc_developer_email,
-                        row.developer,
-                        row.dc_api_product,
-                        row.dc_api_request_id,
-                        row.dc_api_name,
-                        row.dc_case_id,
-                        row.request_path,
-                        row.response_status_code,
-                        row.id_field_from_signzy_response || '',
-                        row.total_response_time,
-                        row.karza_status_code || '',
-                        row.response_description || '',
-                        row.target_sent_start_timestamp,
-                        row.target_received_end_timestamp,
-                        db.convertUTCtoIST(row.target_sent_start_timestamp),
-                        db.convertUTCtoIST(row.target_received_end_timestamp),
-                        row.x_apigee_mintng_price_multiplier,
-                        row.x_apigee_mintng_rate,
-                        row.rate_plan_rate,
-                    ];
-                    worksheet.addRow(rowData).commit();
-                });
+
+            if (pageData?.length > 0) {
+                pageData.forEach(row => worksheet.addRow(formatExportRowData(row)).commit());
                 currentPage++;
             } else {
                 hasMoreData = false;
@@ -2648,15 +2663,45 @@ const analytics_reports_export = async (req, res, next) => {
     }
 };
 
+// Helper to generate unique request ID
+const generateRequestId = () => {
+    const uuid = uuidv4();
+    const formattedDateTime = moment().format('YYYYMMDD_HHmmss');
+    return `${uuid}_${formattedDateTime}`;
+};
+
+// Helper to insert analytics file record
+const insertAnalyticsFileRecord = async (requestId, account_id) => {
+    const query = `INSERT INTO analytics_file_object(request_id, added_by, added_date, status) VALUES (?, ?, ?, ?) RETURNING "file_id"`;
+    const replacements = [requestId, account_id, db.get_ist_current_date(), STATUS_TYPE.Pending];
+    const [rowOut] = await db.sequelize.query(query, { replacements, type: QueryTypes.INSERT });
+    return {
+        file_id: rowOut?.[0]?.file_id || 0,
+        query,
+        replacements
+    };
+};
+
+// Helper to log excel generation action
+const logExcelGenerationAction = (account_id, requestId, query, replacements) => {
+    try {
+        action_logger.info(JSON.stringify({
+            correlation_id: correlator.getId(),
+            token_id: 0,
+            account_id,
+            user_type: 1,
+            user_id: account_id,
+            narration: 'excel genrate with requestid:' + requestId,
+            query: db.buildQuery_Array(query, replacements),
+        }));
+    } catch (_) { }
+};
+
 const cst_analytics_reports_generate_excel = async (req, res, next) => {
-    const { page_no, from_date, upto_date, type } = req.body;
+    const { from_date, upto_date } = req.body;
     try {
         const _customer_id = req.token_data.customer_id;
-        let _page_no = page_no && validator.isNumeric(page_no.toString()) ? parseInt(page_no) : 0;
-        let _type = type && validator.isNumeric(type.toString()) ? parseInt(type) : 0;
-        if (_page_no <= 0) _page_no = 1;
-        if (_type <= 0) _type = 1;
-
+        const { _page_no, _type } = parseExportParams(req.body);
         const email_id = await getCustomerEmail(_customer_id);
 
         if (_customer_id > 0) {
@@ -2667,45 +2712,20 @@ const cst_analytics_reports_generate_excel = async (req, res, next) => {
         }
 
         const { _from_date, _upto_date } = calculateExcelExportDates(from_date, upto_date);
-        const table_name = _type == 1 ? 'apigee_logs_prod' : 'apigee_logs';
-        console.log("------s-table_name-------------------", table_name);
-        const uuid = uuidv4();
-        const formattedDateTime = moment().format('YYYYMMDD_HHmmss');
-        const requestId = `${uuid}_${formattedDateTime}`;
+        const requestId = generateRequestId();
 
-        const _query1 = `INSERT INTO analytics_file_object(request_id, added_by, added_date, status) VALUES (?, ?, ?, ? )RETURNING "file_id"`;
-        const _replacements2 = [requestId, req.token_data.account_id, db.get_ist_current_date(), STATUS_TYPE.Pending];
-        const [rowOut] = await db.sequelize.query(_query1, { replacements: _replacements2, type: QueryTypes.INSERT });
-        const file_id = (rowOut && rowOut.length > 0 && rowOut[0] ? rowOut[0].file_id : 0);
-        if (file_id > 0) {
-            try {
-                let data_to_log = {
-                    correlation_id: correlator.getId(),
-                    token_id: 0,
-                    account_id: (req.token_data.account_id),
-                    user_type: 1,
-                    user_id: req.token_data.account_id,
-                    narration: 'excel genrate with requestid:' + requestId,
-                    query: db.buildQuery_Array(_query1, _replacements2),
-                }
-                action_logger.info(JSON.stringify(data_to_log));
-            } catch (_) { }
-        } else {
+        const { file_id, query, replacements } = await insertAnalyticsFileRecord(requestId, req.token_data.account_id);
+        if (file_id <= 0) {
             return res.status(200).json(success(false, res.statusCode, "Unable to insert request id, Please try again.", null));
         }
 
-        const filePath = path.join(__dirname, `../../../uploads/download_excel/${requestId}.xlsx`);
+        logExcelGenerationAction(req.token_data.account_id, requestId, query, replacements);
 
-        // Ensure the directory exists
+        const filePath = path.join(__dirname, `../../../uploads/download_excel/${requestId}.xlsx`);
         await fs.ensureDir(path.join(__dirname, '../../../uploads/download_excel'));
 
-        console.log("==============filePath=======================", filePath);
         generateExcelFile(req, filePath, requestId, _type, _from_date, _upto_date, email_id);
-        let data = {
-            request_id: requestId
-        }
-        res.status(200).json(success(true, res.statusCode, "Excel generation started.", data));
-
+        res.status(200).json(success(true, res.statusCode, "Excel generation started.", { request_id: requestId }));
     } catch (err) {
         _logger.error(err.stack);
         console.log("----------err.stack---------------", err.stack);
@@ -2713,121 +2733,130 @@ const cst_analytics_reports_generate_excel = async (req, res, next) => {
     }
 };
 
-const generateExcelFile = async (req, filePath, requestId, _type, _from_date, _upto_date, email_id) => {
-    const { search_text, product_id, from_date, upto_date } = req.body;
-    try {
-        let _search_text = search_text && search_text.length > 0 ? search_text : "";
-        let _email_id = email_id && email_id.length > 0 ? email_id : "";
-        const workbook = new excel.stream.xlsx.WorkbookWriter({ filename: filePath });
-        const worksheet = workbook.addWorksheet('Sheet 1');
-        let currentPage = 1;
-        let hasMoreData = true;
-        const pageSize = 10000;
-        const table_name = _type == 1 ? 'apigee_logs_prod' : 'apigee_logs';
+// Helper to build excel generation conditions
+const buildExcelGenConditions = (params) => {
+    const { _email_id, _search_text, product_id, from_date, upto_date, _from_date, _upto_date } = params;
+    const conditions = [];
+    const replacements = {};
 
-        const headers = ['Sr No', 'Email ID', 'Developer ID', 'Api Product', 'API Request ID', 'Api Name', 'Case_Id', 'Request Path', 'API Response Status Code',
-            'Response ID Field', 'Total Response Time (ms)', 'Response Packet Status Code', 'Price Multiplier',
-            'Final Rate', 'Rate Plan Rate', 'Billing Type', 'Response Description', 'API Request Timestamp',
-            'API Response Timestamp', 'API Request Timestamp (IST)', 'API Response Timestamp (IST)'];
-        worksheet.addRow(headers).commit();
+    if (_email_id?.length) {
+        conditions.push(`developer_email = :email_id`);
+        replacements.email_id = _email_id;
+    }
+    if (_search_text?.length) {
+        conditions.push(`request_path ILIKE :search_text`);
+        replacements.search_text = `%${_search_text}%`;
+    }
+    if (product_id?.length) {
+        conditions.push(` api_product = :product_id `);
+        replacements.product_id = product_id;
+    }
+    if (from_date) {
+        conditions.push(` ax_created_time >= :from_date`);
+        replacements.from_date = _from_date;
+    }
+    if (upto_date) {
+        conditions.push(` ax_created_time <= :upto_date`);
+        replacements.upto_date = _upto_date;
+    }
+    return { conditions, replacements };
+};
 
-        while (hasMoreData) {
-            let _query3 = `SELECT ROW_NUMBER() OVER(ORDER BY ax_created_time DESC) AS sr_no, 
+// Helper to build excel generation query
+const buildExcelGenQuery = (table_name, conditions) => {
+    let query = `SELECT ROW_NUMBER() OVER(ORDER BY ax_created_time DESC) AS sr_no,
         id, organization, environment, apiproxy, request_uri, proxy, proxy_basepath, request_path, request_verb, request_size, response_status_code,
-        is_error, client_received_start_timestamp, client_received_end_timestamp, target_sent_start_timestamp, target_sent_end_timestamp, 
-        target_received_start_timestamp, target_received_end_timestamp, client_sent_start_timestamp, client_sent_end_timestamp, client_ip, 
+        is_error, client_received_start_timestamp, client_received_end_timestamp, target_sent_start_timestamp, target_sent_end_timestamp,
+        target_received_start_timestamp, target_received_end_timestamp, client_sent_start_timestamp, client_sent_end_timestamp, client_ip,
         client_id, REPLACE(developer, 'apigeeprotean@@@', '') AS developer, developer_app, api_product, response_size, developer_email,
-        total_response_time, request_processing_latency, response_processing_latency,  ax_created_time,  dc_api_product, dc_api_resource, 
+        total_response_time, request_processing_latency, response_processing_latency, ax_created_time, dc_api_product, dc_api_resource,
         dc_developer_app, dc_developer_app_display_name, dc_developer_email, dc_api_name, dc_api_request_id, dc_case_id,
         dc_karzastauscode AS karza_status_code, dc_backendstatusreason AS response_description,
         dc_signzyresponseid AS id_field_from_signzy_response, x_apigee_mintng_price_multiplier, x_apigee_mintng_rate,
-	    x_apigee_mintng_rate::FLOAT / NULLIF(x_apigee_mintng_price_multiplier::FLOAT, 0) AS rate_plan_rate, dc_billing_type FROM ${table_name} `;
+        x_apigee_mintng_rate::FLOAT / NULLIF(x_apigee_mintng_price_multiplier::FLOAT, 0) AS rate_plan_rate, dc_billing_type FROM ${table_name}`;
+    if (conditions.length > 0) query += ' WHERE ' + conditions.join(' AND ');
+    query += ` ORDER BY ax_created_time DESC LIMIT :page_size OFFSET ((:page_no - 1) * :page_size)`;
+    return query;
+};
 
-            const conditions = [];
-            const replacements = {
-                page_size: pageSize,
-                page_no: currentPage,
-            };
-            console.log("--------------------------", email_id);
-            // if (developerId && developerId.length > 0) {
-            //     // conditions.push(` REPLACE(developer, 'apigeeprotean@@@', '') = :developerId`);
-            //     conditions.push(`developer_email =: 'dhavan.k@phonepe.com'`);
-            //     replacements.developerId = developerId;
-            // }
+// Helper to format excel generation row data
+const formatExcelGenRowData = (row) => [
+    row.sr_no,
+    row.developer_email,
+    row.developer,
+    row.api_product,
+    row.dc_api_request_id,
+    row.dc_api_name,
+    row.dc_case_id,
+    row.request_path,
+    row.response_status_code,
+    row.id_field_from_signzy_response || '',
+    row.total_response_time,
+    row.karza_status_code || '',
+    row.x_apigee_mintng_price_multiplier,
+    row.x_apigee_mintng_rate,
+    null,
+    row.dc_billing_type,
+    row.response_description || '',
+    row.client_received_end_timestamp,
+    row.client_sent_end_timestamp,
+    db.convertUTCtoIST(row.client_received_end_timestamp),
+    db.convertUTCtoIST(row.client_sent_end_timestamp),
+];
 
+// Helper to update analytics file status
+const updateAnalyticsFileStatus = async (requestId, status) => {
+    const query = `Update analytics_file_object SET status = ? WHERE request_id = ?`;
+    await db.sequelize.query(query, { replacements: [status, requestId], type: QueryTypes.UPDATE });
+};
 
-            if (_email_id && _email_id.length > 0) {
-                conditions.push(`developer_email = :email_id`);
-                replacements.email_id = _email_id;
-            }
+// Excel generation headers
+const EXCEL_GEN_HEADERS = ['Sr No', 'Email ID', 'Developer ID', 'Api Product', 'API Request ID', 'Api Name', 'Case_Id', 'Request Path', 'API Response Status Code',
+    'Response ID Field', 'Total Response Time (ms)', 'Response Packet Status Code', 'Price Multiplier',
+    'Final Rate', 'Rate Plan Rate', 'Billing Type', 'Response Description', 'API Request Timestamp',
+    'API Response Timestamp', 'API Request Timestamp (IST)', 'API Response Timestamp (IST)'];
 
-            if (_search_text && _search_text.length > 0) {
-                conditions.push(`request_path ILIKE :search_text`);
-                replacements.search_text = `%${_search_text}%`;
-            }
-            if (product_id && product_id.length > 0) {
-                conditions.push(` api_product = :product_id `);
-                replacements.product_id = product_id;
-            }
+// Helper to process excel data pages
+const processExcelDataPages = async (worksheet, table_name, conditions, baseReplacements, pageSize) => {
+    let currentPage = 1;
+    let hasMoreData = true;
 
-            if (from_date) {
-                conditions.push(` ax_created_time >= :from_date`);
-                replacements.from_date = _from_date;
-            }
+    while (hasMoreData) {
+        const query = buildExcelGenQuery(table_name, conditions);
+        const replacements = { ...baseReplacements, page_size: pageSize, page_no: currentPage };
+        const pageData = await db.sequelize2.query(query, { replacements, type: QueryTypes.SELECT, raw: true });
 
-            if (upto_date) {
-                conditions.push(` ax_created_time <= :upto_date`);
-                replacements.upto_date = _upto_date;
-            }
-
-            if (conditions.length > 0) {
-                _query3 += ' WHERE ' + conditions.join(' AND ');
-            }
-            _query3 += ` ORDER BY ax_created_time DESC LIMIT :page_size OFFSET ((:page_no - 1) * :page_size)`;
-            const pageData = await db.sequelize2.query(_query3, { replacements, type: QueryTypes.SELECT, raw: true });
-            if (pageData && pageData.length > 0) {
-                pageData.forEach(row => {
-                    const rowData = [
-                        row.sr_no,
-                        row.developer_email,
-                        row.developer,
-                        row.api_product,
-                        row.dc_api_request_id,
-                        row.dc_api_name,
-                        row.dc_case_id,
-                        row.request_path,
-                        row.response_status_code,
-                        row.id_field_from_signzy_response || '',
-                        row.total_response_time,
-                        row.karza_status_code || '',
-                        row.x_apigee_mintng_price_multiplier,
-                        row.x_apigee_mintng_rate,
-                        null, // row.rate_plan_rate,
-                        row.dc_billing_type,
-                        row.response_description || '',
-                        row.client_received_end_timestamp,
-                        row.client_sent_end_timestamp,
-                        db.convertUTCtoIST(row.client_received_end_timestamp),
-                        db.convertUTCtoIST(row.client_sent_end_timestamp),
-
-                    ];
-                    worksheet.addRow(rowData).commit();
-                });
-                currentPage++;
-            } else {
-                hasMoreData = false;
-            }
+        if (pageData?.length > 0) {
+            pageData.forEach(row => worksheet.addRow(formatExcelGenRowData(row)).commit());
+            currentPage++;
+        } else {
+            hasMoreData = false;
         }
+    }
+};
+
+const generateExcelFile = async (req, filePath, requestId, _type, _from_date, _upto_date, email_id) => {
+    const { search_text, product_id, from_date, upto_date } = req.body;
+    try {
+        const _search_text = search_text?.length ? search_text : "";
+        const _email_id = email_id?.length ? email_id : "";
+        const table_name = getTableNameByType(_type);
+
+        const workbook = new excel.stream.xlsx.WorkbookWriter({ filename: filePath });
+        const worksheet = workbook.addWorksheet('Sheet 1');
+        worksheet.addRow(EXCEL_GEN_HEADERS).commit();
+
+        const { conditions, replacements } = buildExcelGenConditions({
+            _email_id, _search_text, product_id, from_date, upto_date, _from_date, _upto_date
+        });
+
+        await processExcelDataPages(worksheet, table_name, conditions, replacements, 10000);
         await workbook.commit();
-        const _query1 = `Update analytics_file_object SET status = ? WHERE  request_id =?`;
-        const _replacements2 = [STATUS_TYPE.Completed, requestId];
-        await db.sequelize.query(_query1, { replacements: _replacements2, type: QueryTypes.UPDATE });
+        await updateAnalyticsFileStatus(requestId, STATUS_TYPE.Completed);
         console.log(`Excel file generated successfully: ${filePath}`);
     } catch (err) {
         console.error("Error generating Excel file:", err);
-        const _query1 = `Update analytics_file_object SET status = ? WHERE  request_id = ?`;
-        const _replacements2 = [STATUS_TYPE.Failed, requestId];
-        await db.sequelize.query(_query1, { replacements: _replacements2, type: QueryTypes.UPDATE });
+        await updateAnalyticsFileStatus(requestId, STATUS_TYPE.Failed);
     }
 };
 

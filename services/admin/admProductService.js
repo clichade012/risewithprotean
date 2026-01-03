@@ -68,95 +68,81 @@ const logAction = (req, narration, query) => {
     } catch (_) { }
 };
 
+// Helper to parse list request params
+const parseListParams = (body) => {
+    const { page_no, search_text, order_by_filter } = body;
+    return {
+        _page_no: Math.max(1, parseNumericWithDefault(page_no, 1)),
+        _order_by_filter: parseNumericWithDefault(order_by_filter),
+        _search_text: search_text?.length > 0 ? search_text : ""
+    };
+};
+
+// Helper to format date (moved here for use in formatProductListItem)
+const formatDate = (date) => date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(date)) : "";
+
+// Helper to format product list item
+const formatProductListItem = (item) => ({
+    sr_no: item.sr_no,
+    product_id: item.product_id,
+    rate_id: item.monitization_rate_id,
+    product_name: item.product_name,
+    display_name: item.display_name,
+    is_published: item.is_published,
+    admin_name: item.admin_name,
+    description: item.description,
+    page_text: item.page_text,
+    key_features: item.key_features,
+    flow_chart: item.flow_chart,
+    is_manual: item.is_manual,
+    is_product_published: item.is_product_published,
+    is_routing_applicable: item.is_routing_applicable,
+    sort_order: item.sort_order,
+    product_sort_order: item.product_sort_order,
+    added_date: formatDate(item.added_date),
+    modify_date: formatDate(item.modify_date),
+    json_data: item.json_data,
+    rate_plan_value: item.rate_plan_value,
+});
+
+// Product list query
+const PRODUCT_LIST_QUERY = `SELECT ROW_NUMBER() OVER(ORDER BY CASE WHEN :order_by_filter = 0 THEN p.product_id END DESC,
+    CASE WHEN :order_by_filter = 1 THEN CASE WHEN COALESCE(p.sort_order, 0) <= 0 THEN 9223372036854775807 ELSE COALESCE(p.sort_order, 0) END END ASC,
+    CASE WHEN :order_by_filter = 2 THEN CASE WHEN COALESCE(p.product_sort_order, 0) <= 0 THEN 9223372036854775807 ELSE COALESCE(p.product_sort_order, 0) END END ASC) AS sr_no,
+    p.product_id, p.unique_id, p.product_name, p.is_published, p.description, p.page_text, p.key_features, p.flow_chart,
+    p.added_date, p.modify_date, p.added_by, p.modify_by, p.json_data, CONCAT(a.first_name, ' ', a.last_name) AS admin_name,
+    p.is_manual, p.is_product_published, p.display_name, p.sort_order, p.product_sort_order, p.is_routing_applicable, p.rate_plan_value, p.monitization_rate_id
+    FROM product p INNER JOIN adm_user a ON p.added_by = a.admin_id
+    WHERE p.is_deleted = false AND (LOWER(p.product_name) LIKE LOWER(:search_text) OR LOWER(p.description) LIKE LOWER(:search_text)) ORDER BY
+    CASE WHEN :order_by_filter = 0 THEN p.product_id END DESC,
+    CASE WHEN :order_by_filter = 1 THEN CASE WHEN COALESCE(p.sort_order, 0) <= 0 THEN 9223372036854775807 ELSE COALESCE(p.sort_order, 0) END END ASC,
+    CASE WHEN :order_by_filter = 2 THEN CASE WHEN COALESCE(p.product_sort_order, 0) <= 0 THEN 9223372036854775807 ELSE COALESCE(p.product_sort_order, 0) END END ASC
+    LIMIT :page_size OFFSET ((:page_no - 1) * :page_size)`;
+
 const api_products_list = async (req, res, next) => {
-    const { page_no, search_text, order_by_filter } = req.body;
     const { Product } = db.models;
     try {
-        let _page_no = page_no && validator.isNumeric(page_no.toString()) ? parseInt(page_no) : 0;
-        let _order_by_filter = order_by_filter && validator.isNumeric(order_by_filter.toString()) ? parseInt(order_by_filter) : 0;
-        if (_page_no <= 0) { _page_no = 1; }
-        let _search_text = search_text && search_text.length > 0 ? search_text : "";
+        const { _page_no, _order_by_filter, _search_text } = parseListParams(req.body);
 
-        // Build where clause with case-insensitive search
-        const whereClause = {
-            is_deleted: false,
-            ...(_search_text && {
-                [Op.or]: [
-                    db.sequelize.where(
-                        db.sequelize.fn('LOWER', db.sequelize.col('product_name')),
-                        { [Op.like]: db.sequelize.fn('LOWER', `%${_search_text}%`) }
-                    ),
-                    db.sequelize.where(
-                        db.sequelize.fn('LOWER', db.sequelize.col('description')),
-                        { [Op.like]: db.sequelize.fn('LOWER', `%${_search_text}%`) }
-                    )
-                ]
-            })
-        };
-
-        // Count total records
-        const total_record = await Product.count({ where: whereClause });
-        const [is_admin, is_checker, is_maker] = await commonModule.getUserRoles(req);
-
-        // For complex ROW_NUMBER() OVER() with CASE WHEN, using raw query with ORM models
-        const _query1 = ` SELECT ROW_NUMBER() OVER(ORDER BY CASE WHEN  :order_by_filter = 0 THEN p.product_id END DESC,
-        CASE WHEN  :order_by_filter = 1 THEN CASE WHEN COALESCE(p.sort_order, 0) <= 0 THEN 9223372036854775807 ELSE COALESCE(p.sort_order, 0) END END ASC,
-        CASE WHEN  :order_by_filter = 2  THEN CASE WHEN COALESCE(p.product_sort_order, 0) <= 0 THEN 9223372036854775807 ELSE COALESCE(p.product_sort_order, 0) END END ASC) AS sr_no,
-        p.product_id, p.unique_id, p.product_name, p.is_published,p.description, p.page_text, p.key_features, p.flow_chart,
-        p.added_date, p.modify_date, p.added_by, p.modify_by, p.json_data, CONCAT(a.first_name, ' ', a.last_name) AS admin_name,
-        p.is_manual, p.is_product_published, p.display_name, p.sort_order, p.product_sort_order, p.is_routing_applicable, p.rate_plan_value, p.monitization_rate_id
-        FROM product p INNER JOIN adm_user a ON p.added_by = a.admin_id
-        WHERE p.is_deleted = false AND (LOWER(p.product_name) LIKE LOWER(:search_text) OR LOWER(p.description) LIKE LOWER(:search_text)) ORDER BY
-        CASE WHEN  :order_by_filter = 0 THEN p.product_id END DESC,
-        CASE WHEN  :order_by_filter = 1 THEN CASE WHEN COALESCE(p.sort_order, 0) <= 0 THEN 9223372036854775807 ELSE COALESCE(p.sort_order, 0) END END ASC,
-        CASE WHEN  :order_by_filter = 2  THEN CASE WHEN COALESCE(p.product_sort_order, 0) <= 0 THEN 9223372036854775807 ELSE COALESCE(p.product_sort_order, 0) END END ASC
-        LIMIT :page_size OFFSET ((:page_no - 1) * :page_size)  `;
-
-        const row1 = await db.sequelize.query(_query1, {
-            replacements: {
-                search_text: "%" + _search_text + "%",
-                page_size: process.env.PAGINATION_SIZE,
-                page_no: _page_no,
-                order_by_filter: _order_by_filter
-            },
-            type: QueryTypes.SELECT,
+        const total_record = await Product.count({
+            where: { is_deleted: false, ..._search_text && { [Op.or]: [
+                db.sequelize.where(db.sequelize.fn('LOWER', db.sequelize.col('product_name')), { [Op.like]: db.sequelize.fn('LOWER', `%${_search_text}%`) }),
+                db.sequelize.where(db.sequelize.fn('LOWER', db.sequelize.col('description')), { [Op.like]: db.sequelize.fn('LOWER', `%${_search_text}%`) })
+            ]}}
         });
 
-        let list = [];
-        if (row1) {
-            for (const item of row1) {
-                list.push({
-                    sr_no: item.sr_no,
-                    product_id: item.product_id,
-                    rate_id: item.monitization_rate_id,
-                    product_name: item.product_name,
-                    display_name: item.display_name,
-                    is_published: item.is_published,
-                    admin_name: item.admin_name,
-                    description: item.description,
-                    page_text: item.page_text,
-                    key_features: item.key_features,
-                    flow_chart: item.flow_chart,
-                    is_manual: item.is_manual,
-                    is_product_published: item.is_product_published,
-                    is_routing_applicable: item.is_routing_applicable,
-                    sort_order: item.sort_order,
-                    product_sort_order: item.product_sort_order,
-                    added_date: item.added_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(item.added_date)) : "",
-                    modify_date: item.modify_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(item.modify_date)) : "",
-                    json_data: item.json_data,
-                    rate_plan_value: item.rate_plan_value,
-                });
-            }
-        }
+        const [is_admin, is_checker, is_maker] = await commonModule.getUserRoles(req);
+
+        const row1 = await db.sequelize.query(PRODUCT_LIST_QUERY, {
+            replacements: { search_text: `%${_search_text}%`, page_size: process.env.PAGINATION_SIZE, page_no: _page_no, order_by_filter: _order_by_filter },
+            type: QueryTypes.SELECT,
+        });
 
         const results = {
             current_page: _page_no,
             total_pages: Math.ceil(total_record / process.env.PAGINATION_SIZE),
-            data: list,
-            is_admin: is_admin,
-            is_maker: is_maker,
-            is_checker: is_checker,
+            data: (row1 || []).map(formatProductListItem),
+            is_admin, is_maker, is_checker,
         };
         return res.status(200).json(success(true, res.statusCode, "", results));
     } catch (err) {
@@ -165,17 +151,141 @@ const api_products_list = async (req, res, next) => {
     }
 };
 
+// Helper to get safe string value
+const getSafeString = (value) => value?.length > 0 ? value : '';
+
+// Helper to format product page
+const formatProductPage = (pp) => ({
+    page_id: pp.page_id,
+    product_id: pp.product_id,
+    rate_id: pp.monitization_rate_id,
+    rate_plan_value: pp.rate_plan_value,
+    menu_name: pp.menu_name,
+    show_api_method: pp.show_api_method,
+    sort_order: pp.sort_order,
+    is_published: pp.is_published,
+    show_helpful_box: pp.show_helpful_box,
+    page_contents: pp.page_contents,
+    show_page_header_nav: pp.show_page_header_nav,
+    is_integration_page: pp.is_integration_page,
+    is_overview_page: pp.is_overview_page,
+    is_api_reference_page: pp.is_api_reference_page,
+    added_on: formatDate(pp.added_date),
+    modify_on: formatDate(pp.modify_date),
+});
+
+// Helper to format endpoint
+const formatEndpoint = (e) => ({
+    endpoint_id: e.endpoint_id,
+    product_id: e.product_id,
+    endpoint_url: e.endpoint_url,
+    display_name: e.display_name,
+    description: e.description,
+    is_published: e.is_published,
+    is_product_published: e.is_product_published,
+    sort_order: e.sort_order,
+    is_manual: e.is_manual,
+    redirect_url: e.redirect_url,
+    category_id: e.category_id,
+    added_on: formatDate(e.added_date),
+    modify_on: formatDate(e.modify_date),
+});
+
+// Helper to format proxy with endpoints
+const formatProxy = (ps, endpoints) => ({
+    proxy_id: ps.proxy_id,
+    proxy_name: ps.proxy_name,
+    is_published: ps.is_published,
+    display_name: ps.display_name,
+    description: ps.description,
+    is_manual: ps.is_manual,
+    added_on: formatDate(ps.added_date),
+    modify_on: formatDate(ps.modify_date),
+    endpoint: endpoints,
+});
+
+// Helper to build product result object
+const buildProductResult = (row0, product_pages, proxies) => ({
+    product_id: row0.product_id,
+    product_name: row0.product_name,
+    display_name: row0.display_name,
+    is_published: row0.is_published,
+    description: row0.description || '',
+    page_text: row0.page_text || '',
+    api_doc_version: row0.api_doc_version,
+    product_icon: getSafeString(row0.product_icon),
+    flow_chart: getSafeString(row0.flow_chart),
+    product_open_spec: getSafeString(row0.product_open_spec),
+    product_open_spec_json: getSafeString(row0.product_open_spec_json),
+    product_documentation_pdf: getSafeString(row0.product_documentation_pdf),
+    key_features: row0.key_features || '',
+    added_on: formatDate(row0.added_date),
+    modify_on: formatDate(row0.modify_date),
+    product_note: row0.product_note || '',
+    is_manual: row0.is_manual,
+    sort_order: row0.sort_order,
+    product_sort_order: row0.product_sort_order,
+    category_id: row0.category_id,
+    product_pages,
+    proxies,
+});
+
+// Helper to fetch product pages
+const fetchProductPages = async (ProductPages, product_id) => {
+    const pages = await ProductPages.findAll({
+        where: { product_id, is_deleted: false },
+        attributes: ['page_id', 'product_id', 'menu_name', 'show_api_method', 'sort_order', 'is_published', 'is_deleted',
+            'added_date', 'modify_date', 'show_helpful_box', 'page_contents', 'show_page_header_nav',
+            'is_integration_page', 'is_overview_page', 'is_api_reference_page'],
+        order: [
+            [db.sequelize.literal('CASE WHEN COALESCE(sort_order, 0) <= 0 THEN 9223372036854775807 ELSE COALESCE(sort_order, 0) END'), 'ASC'],
+            ['page_id', 'ASC']
+        ],
+        raw: true
+    });
+    return (pages || []).map(formatProductPage);
+};
+
+// Helper to fetch endpoints for a proxy
+const fetchEndpointsForProxy = async (Endpoint, proxy_id) => {
+    const endpoints = await Endpoint.findAll({
+        where: { proxy_id, is_deleted: false },
+        attributes: ['endpoint_id', 'product_id', 'endpoint_url', 'display_name', 'description', 'is_published',
+            'is_product_published', 'added_date', 'modify_date', 'sort_order', 'redirect_url', 'is_manual', 'category_id'],
+        order: [
+            [db.sequelize.literal('CASE WHEN COALESCE(sort_order, 0) <= 0 THEN 9223372036854775807 ELSE COALESCE(sort_order, 0) END'), 'ASC'],
+            ['endpoint_id', 'ASC']
+        ],
+        raw: true
+    });
+    return (endpoints || []).map(formatEndpoint);
+};
+
+// Helper to fetch proxies with endpoints
+const fetchProxiesWithEndpoints = async (Proxies, Endpoint, product_id) => {
+    const proxiesData = await Proxies.findAll({
+        where: { product_id, is_deleted: false },
+        attributes: ['proxy_id', 'proxy_name', 'is_published', 'description', 'added_date', 'modify_date', 'is_manual', 'display_name'],
+        order: [['proxy_id', 'DESC']],
+        raw: true
+    });
+
+    const proxies = [];
+    for (const ps of proxiesData || []) {
+        const endpoints = await fetchEndpointsForProxy(Endpoint, ps.proxy_id);
+        proxies.push(formatProxy(ps, endpoints));
+    }
+    return proxies;
+};
+
 const product_get = async (req, res, next) => {
     const { product_id } = req.body;
     const { Product, ProductPages, Proxies, Endpoint } = db.models;
     try {
-        let _product_id = product_id && validator.isNumeric(product_id.toString()) ? parseInt(product_id) : 0;
+        const _product_id = parseNumericWithDefault(product_id);
 
         const row0 = await Product.findOne({
-            where: {
-                product_id: _product_id,
-                is_deleted: false
-            },
+            where: { product_id: _product_id, is_deleted: false },
             attributes: ['product_id', 'product_name', 'is_published', 'description', 'page_text', 'flow_chart', 'key_features',
                 'added_date', 'modify_date', 'product_note', 'product_icon', 'product_open_spec', 'product_open_spec_json',
                 'product_documentation_pdf', 'is_manual', 'api_doc_version', 'display_name', 'sort_order', 'product_sort_order',
@@ -183,141 +293,17 @@ const product_get = async (req, res, next) => {
             raw: true
         });
 
-        if (row0) {
-            let product_pages = [];
-            const row23 = await ProductPages.findAll({
-                where: {
-                    product_id: _product_id,
-                    is_deleted: false
-                },
-                attributes: ['page_id', 'product_id', 'menu_name', 'show_api_method', 'sort_order', 'is_published', 'is_deleted',
-                    'added_date', 'modify_date', 'show_helpful_box', 'page_contents', 'show_page_header_nav',
-                    'is_integration_page', 'is_overview_page', 'is_api_reference_page'],
-                order: [
-                    [db.sequelize.literal('CASE WHEN COALESCE(sort_order, 0) <= 0 THEN 9223372036854775807 ELSE COALESCE(sort_order, 0) END'), 'ASC'],
-                    ['page_id', 'ASC']
-                ],
-                raw: true
-            });
-
-            if (row23) {
-                for (const pp of row23) {
-                    product_pages.push({
-                        page_id: pp.page_id,
-                        product_id: pp.product_id,
-                        rate_id: pp.monitization_rate_id,
-                        rate_plan_value: pp.rate_plan_value,
-                        menu_name: pp.menu_name,
-                        show_api_method: pp.show_api_method,
-                        sort_order: pp.sort_order,
-                        is_published: pp.is_published,
-                        show_helpful_box: pp.show_helpful_box,
-                        page_contents: pp.page_contents,
-                        show_page_header_nav: pp.show_page_header_nav,
-                        is_integration_page: pp.is_integration_page,
-                        is_overview_page: pp.is_overview_page,
-                        is_api_reference_page: pp.is_api_reference_page,
-                        added_on: pp.added_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(pp.added_date)) : "",
-                        modify_on: pp.modify_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(pp.modify_date)) : "",
-                    });
-                }
-            }
-
-            let proxies = [];
-            const row1 = await Proxies.findAll({
-                where: {
-                    product_id: _product_id,
-                    is_deleted: false
-                },
-                attributes: ['proxy_id', 'proxy_name', 'is_published', 'description', 'added_date', 'modify_date', 'is_manual', 'display_name'],
-                order: [['proxy_id', 'DESC']],
-                raw: true
-            });
-
-            if (row1) {
-                for (const ps of row1) {
-                    let endpoint = [];
-                    const row2 = await Endpoint.findAll({
-                        where: {
-                            proxy_id: ps.proxy_id,
-                            is_deleted: false
-                        },
-                        attributes: ['endpoint_id', 'product_id', 'endpoint_url', 'display_name', 'description', 'is_published',
-                            'is_product_published', 'added_date', 'modify_date', 'sort_order', 'redirect_url', 'is_manual', 'category_id'],
-                        order: [
-                            [db.sequelize.literal('CASE WHEN COALESCE(sort_order, 0) <= 0 THEN 9223372036854775807 ELSE COALESCE(sort_order, 0) END'), 'ASC'],
-                            ['endpoint_id', 'ASC']
-                        ],
-                        raw: true
-                    });
-
-                    if (row2) {
-                        for (const e of row2) {
-                            endpoint.push({
-                                endpoint_id: e.endpoint_id,
-                                product_id: e.product_id,
-                                endpoint_url: e.endpoint_url,
-                                display_name: e.display_name,
-                                description: e.description,
-                                is_published: e.is_published,
-                                is_product_published: e.is_product_published,
-                                sort_order: e.sort_order,
-                                is_manual: e.is_manual,
-                                redirect_url: e.redirect_url,
-                                category_id: e.category_id,
-                                added_on: e.added_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(e.added_date)) : "",
-                                modify_on: e.modify_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(e.modify_date)) : "",
-                            });
-                        }
-                    }
-                    proxies.push({
-                        proxy_id: ps.proxy_id,
-                        proxy_name: ps.proxy_name,
-                        is_published: ps.is_published,
-                        display_name: ps.display_name,
-                        description: ps.description,
-                        is_manual: ps.is_manual,
-                        added_on: ps.added_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(ps.added_date)) : "",
-                        modify_on: ps.modify_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(ps.modify_date)) : "",
-                        endpoint: endpoint,
-                    });
-                }
-            }
-
-            let product_open_spec = row0.product_open_spec && row0.product_open_spec.length > 0 ? row0.product_open_spec : '';
-            let flow_chart = row0.flow_chart && row0.flow_chart.length > 0 ? row0.flow_chart : '';
-            let product_icon = row0.product_icon && row0.product_icon.length > 0 ? row0.product_icon : '';
-            let product_open_spec_json = row0.product_open_spec_json && row0.product_open_spec_json.length > 0 ? row0.product_open_spec_json : '';
-            let product_documentation_pdf = row0.product_documentation_pdf && row0.product_documentation_pdf.length > 0 ? row0.product_documentation_pdf : '';
-
-            const results = {
-                product_id: row0.product_id,
-                product_name: row0.product_name,
-                display_name: row0.display_name,
-                is_published: row0.is_published,
-                description: (row0.description ? row0.description : ''),
-                page_text: (row0.page_text ? row0.page_text : ''),
-                api_doc_version: row0.api_doc_version,
-                product_icon: product_icon,
-                flow_chart: flow_chart,
-                product_open_spec: product_open_spec,
-                product_open_spec_json: product_open_spec_json,
-                product_documentation_pdf: product_documentation_pdf,
-                key_features: (row0.key_features ? row0.key_features : ''),
-                added_on: row0.added_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(row0.added_date)) : "",
-                modify_on: row0.modify_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(row0.modify_date)) : "",
-                product_note: (row0.product_note ? row0.product_note : ''),
-                is_manual: row0.is_manual,
-                sort_order: row0.sort_order,
-                product_sort_order: row0.product_sort_order,
-                category_id: row0.category_id,
-                product_pages: product_pages,
-                proxies: proxies,
-            };
-            return res.status(200).json(success(true, res.statusCode, "", results));
-        } else {
+        if (!row0) {
             return res.status(200).json(success(false, res.statusCode, "Product details not found, Please try again.", null));
         }
+
+        const [product_pages, proxies] = await Promise.all([
+            fetchProductPages(ProductPages, _product_id),
+            fetchProxiesWithEndpoints(Proxies, Endpoint, _product_id)
+        ]);
+
+        const results = buildProductResult(row0, product_pages, proxies);
+        return res.status(200).json(success(true, res.statusCode, "", results));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
@@ -381,100 +367,204 @@ const api_products_publish = async (req, res, next) => {
     }
 };
 
+// Helper to build Apigee product URL
+const buildApigeeProductUrl = (product_name = '') => {
+    const base = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/apiproducts`;
+    return product_name ? `${base}/${product_name}` : base;
+};
+
+// Helper to fetch Apigee product details and update display name
+const fetchAndUpdateDisplayName = async (Product, product_id, product_name) => {
+    const apigeeAuth = await db.get_apigee_token();
+    const response = await fetch(buildApigeeProductUrl(product_name), {
+        method: "GET", headers: { Authorization: `Bearer ${apigeeAuth}` },
+    });
+    if (response.status === 200) {
+        const data = await response.json();
+        await Product.update({ display_name: data.displayName }, { where: { product_id } });
+    }
+};
+
+// Helper to process existing product
+const updateExistingProduct = async (Product, row1, product_name) => {
+    console.log(`${product_name} is already exists.`);
+    await fetchAndUpdateDisplayName(Product, row1.product_id, product_name);
+};
+
+// Helper to create new product
+const createNewProduct = async (Product, product_name, account_id, json_data) => {
+    const newProduct = await Product.create({
+        product_name,
+        added_by: account_id,
+        modify_by: account_id,
+        added_date: db.get_ist_current_date(),
+        modify_date: db.get_ist_current_date(),
+        json_data,
+        is_manual: false
+    });
+    const product_id = newProduct?.product_id ?? 0;
+    if (product_id > 0) {
+        console.log(`${product_name} saved successfully.`);
+        await fetchAndUpdateDisplayName(Product, product_id, product_name);
+    } else {
+        console.log(`Unable to save ${product_name}, please try again.`);
+    }
+};
+
+// Helper to process single Apigee product
+const processApigeeProduct = async (Product, product, json_data, account_id) => {
+    const product_name = product.name;
+    const existingProduct = await Product.findOne({
+        where: { product_name, is_deleted: false, is_manual: false },
+        attributes: ['product_id', 'product_name'],
+        raw: true
+    });
+
+    if (existingProduct) {
+        await updateExistingProduct(Product, existingProduct, product_name);
+    } else {
+        await createNewProduct(Product, product_name, account_id, json_data);
+    }
+};
+
 const api_products_update = async (req, res, next) => {
     const { Product } = db.models;
     try {
-        const product_URL = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/apiproducts`;
         const apigeeAuth = await db.get_apigee_token();
-        const response = await fetch(product_URL, {
-            method: "GET", headers: { Authorization: `Bearer ${apigeeAuth}`, },
+        const response = await fetch(buildApigeeProductUrl(), {
+            method: "GET", headers: { Authorization: `Bearer ${apigeeAuth}` },
         });
         const data = await response.json();
-        if (response.status == 200) {
-            for (const product of data.apiProduct) {
-                const product_name = product.name;
-                const response = JSON.stringify(data.apiProduct);
 
-                const row1 = await Product.findOne({
-                    where: {
-                        product_name: product_name,
-                        is_deleted: false,
-                        is_manual: false
-                    },
-                    attributes: ['product_id', 'product_name'],
-                    raw: true
-                });
+        if (response.status !== 200) {
+            const errorMsg = data?.error?.message || 'Unknown error';
+            return res.status(200).json(success(false, res.statusCode, "Apigee response : " + errorMsg, null));
+        }
 
-                if (row1) {
-                    console.log(`${product_name} is already exists.`);
-                    const product_URL = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/apiproducts/${product_name}`;
-                    const apigeeAuth = await db.get_apigee_token();
-                    const response1 = await fetch(product_URL, {
-                        method: "GET", headers: { Authorization: `Bearer ${apigeeAuth}`, },
-                    });
-                    const data1 = await response1.json();
-                    if (response1.status == 200) {
-                        await Product.update(
-                            { display_name: data1.displayName },
-                            { where: { product_id: row1.product_id } }
-                        );
-                    }
-                }
-                else {
-                    const newProduct = await Product.create({
-                        product_name: product_name,
-                        added_by: req.token_data.account_id,
-                        modify_by: req.token_data.account_id,
-                        added_date: db.get_ist_current_date(),
-                        modify_date: db.get_ist_current_date(),
-                        json_data: response,
-                        is_manual: false
-                    });
+        const json_data = JSON.stringify(data.apiProduct);
+        for (const product of data.apiProduct) {
+            await processApigeeProduct(Product, product, json_data, req.token_data.account_id);
+        }
 
-                    const product_id = newProduct?.product_id ?? 0;
-                    if (product_id > 0) {
-                        console.log(`${product_name} saved successfully.`);
-                        const product_URL = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/apiproducts/${product_name}`;
-                        const apigeeAuth = await db.get_apigee_token();
-                        const response2 = await fetch(product_URL, {
-                            method: "GET", headers: { Authorization: `Bearer ${apigeeAuth}`, },
-                        });
-                        const data2 = await response2.json();
-                        if (response2.status == 200) {
-                            await Product.update(
-                                { display_name: data2.displayName },
-                                { where: { product_id: product_id } }
-                            );
-                        }
-                    } else {
-                        console.log(`Unable to save ${product_name}, please try again.`);
-                    }
-                }
-            }
-            try {
-                let data_to_log = {
-                    correlation_id: correlator.getId(),
-                    token_id: req.token_data.token_id,
-                    account_id: req.token_data.account_id,
-                    user_type: 1,
-                    user_id: req.token_data.admin_id,
-                    narration: 'Product pull from apigee.',
-                    query: '',
-                    date_time: db.get_ist_current_date(),
-                }
-                action_logger.info(JSON.stringify(data_to_log));
-            } catch (_) { }
-            return res.status(200).json(success(true, res.statusCode, "Products saved successfully.", null));
-        }
-        else if (data?.error?.message?.length > 0) {
-            return res.status(200).json(success(false, res.statusCode, "Apigee response : " + data.error.message, null));
-        }
-        else {
-            return res.status(200).json(success(false, res.statusCode, "Apigee response : " + data.error.message, null));
-        }
+        logAction(req, 'Product pull from apigee.', '');
+        return res.status(200).json(success(true, res.statusCode, "Products saved successfully.", null));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
+    }
+};
+
+// Helper to ensure proxy exists in list
+const ensureProxyInList = (proxy_database_list, proxy_id) => {
+    if (!proxy_database_list.find(e => e.id === proxy_id)) {
+        proxy_database_list.push({ id: proxy_id, ids: [] });
+    }
+};
+
+// Helper to restore deleted proxy
+const restoreDeletedProxy = async (Proxies, proxyRow) => {
+    if (proxyRow.is_deleted) {
+        await Proxies.update({ is_deleted: false }, { where: { proxy_id: proxyRow.proxy_id } });
+    }
+};
+
+// Helper to update or restore endpoint
+const updateOrRestoreEndpoint = async (Endpoint, endpointRow, endpoint_methods) => {
+    if (endpointRow.endpoint_id > 0) {
+        await Endpoint.update({ methods: endpoint_methods }, { where: { endpoint_id: endpointRow.endpoint_id } });
+    }
+    if (endpointRow.is_deleted) {
+        await Endpoint.update({ is_deleted: false }, { where: { endpoint_id: endpointRow.endpoint_id } });
+    }
+};
+
+// Helper to create new endpoint
+const createEndpoint = async (Endpoint, params) => {
+    const { product_id, proxy_id, endpoint_url, json_data, account_id, endpoint_methods } = params;
+    const newEndpoint = await Endpoint.create({
+        product_id, proxy_id, endpoint_url, json_data,
+        added_by: account_id, added_date: db.get_ist_current_date(), methods: endpoint_methods
+    });
+    return newEndpoint?.endpoint_id ?? 0;
+};
+
+// Helper to process endpoint for existing proxy
+const processEndpointForProxy = async (Endpoint, proxy_database_list, params) => {
+    const { product_id, proxy_id, endpoint_url, endpoint_methods, json_data, account_id } = params;
+    const endpointRow = await Endpoint.findOne({
+        where: { endpoint_url, proxy_id },
+        attributes: ['proxy_id', 'endpoint_url', 'endpoint_id', 'is_deleted'],
+        raw: true
+    });
+
+    if (endpointRow) {
+        addEndpointToProxyList(proxy_database_list, proxy_id, endpointRow.endpoint_id);
+        await updateOrRestoreEndpoint(Endpoint, endpointRow, endpoint_methods);
+    } else {
+        const endpoint_id = await createEndpoint(Endpoint, { product_id, proxy_id, endpoint_url, json_data, account_id, endpoint_methods });
+        if (endpoint_id > 0) addEndpointToProxyList(proxy_database_list, proxy_id, endpoint_id);
+    }
+};
+
+// Helper to process existing proxy
+const processExistingProxy = async (Proxies, Endpoint, proxy_database_list, proxyRow, operationData, params) => {
+    const proxy_id = proxyRow.proxy_id;
+    ensureProxyInList(proxy_database_list, proxy_id);
+    await restoreDeletedProxy(Proxies, proxyRow);
+
+    const endpoint_url = operationData.operations[0].resource;
+    const endpoint_methods = operationData.operations[0].methods;
+    await processEndpointForProxy(Endpoint, proxy_database_list, {
+        ...params, proxy_id, endpoint_url, endpoint_methods
+    });
+};
+
+// Helper to create new proxy and its endpoint
+const createNewProxyWithEndpoint = async (Proxies, Endpoint, proxy_database_list, operationData, params) => {
+    const { product_id, json_data, account_id, proxy_name } = params;
+    const newProxy = await Proxies.create({
+        product_id, proxy_name, added_by: account_id, added_date: db.get_ist_current_date(), json_data
+    });
+    const proxy_id = newProxy?.proxy_id ?? 0;
+    if (proxy_id <= 0) return;
+
+    proxy_database_list.push({ id: proxy_id, ids: [] });
+    const endpoint_url = operationData.operations[0].resource;
+    const endpoint_methods = operationData.operations[0].methods.join("|");
+    await processEndpointForProxy(Endpoint, proxy_database_list, {
+        product_id, proxy_id, endpoint_url, endpoint_methods, json_data, account_id
+    });
+};
+
+// Helper to process single operation config
+const processOperationConfig = async (Proxies, Endpoint, proxy_database_list, operationData, params) => {
+    const proxy_name = operationData.apiSource;
+    const proxyRow = await Proxies.findOne({
+        where: { proxy_name, product_id: params.product_id },
+        attributes: ['proxy_id', 'proxy_name', 'is_deleted'],
+        raw: true
+    });
+
+    if (proxyRow) {
+        await processExistingProxy(Proxies, Endpoint, proxy_database_list, proxyRow, operationData, { ...params, proxy_name });
+    } else {
+        await createNewProxyWithEndpoint(Proxies, Endpoint, proxy_database_list, operationData, { ...params, proxy_name });
+    }
+};
+
+// Helper to cleanup stale proxies and endpoints
+const cleanupStaleProxiesAndEndpoints = async (Proxies, Endpoint, product_id, proxy_database_list) => {
+    const tmp_proxies = proxy_database_list.map(p => p.id);
+    const proxyWhereClause = tmp_proxies.length > 0
+        ? { product_id, proxy_id: { [Op.notIn]: tmp_proxies } }
+        : { product_id };
+    await Proxies.update({ is_published: false, is_deleted: true }, { where: proxyWhereClause });
+
+    for (const proxyItem of proxy_database_list) {
+        const endpointWhereClause = proxyItem.ids.length > 0
+            ? { proxy_id: proxyItem.id, endpoint_id: { [Op.notIn]: proxyItem.ids } }
+            : { proxy_id: proxyItem.id };
+        await Endpoint.update({ is_published: false, is_deleted: true }, { where: endpointWhereClause });
     }
 };
 
@@ -482,8 +572,7 @@ const proxy_products_update = async (req, res, next) => {
     const { product_id } = req.body;
     const { Product, Proxies, Endpoint } = db.models;
     try {
-        let _product_id = product_id && validator.isNumeric(product_id.toString()) ? parseInt(product_id) : 0;
-
+        const _product_id = parseNumericWithDefault(product_id);
         const productRow = await Product.findOne({
             where: { product_id: _product_id, is_deleted: false },
             attributes: ['product_id', 'product_name'],
@@ -492,207 +581,33 @@ const proxy_products_update = async (req, res, next) => {
         if (!productRow) {
             return res.status(200).json(success(false, res.statusCode, "Product details not found, Please try again.", null));
         }
-        const product_name = productRow.product_name;
 
-        const product_URL = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/apiproducts/${product_name}`;
         const apigeeAuth = await db.get_apigee_token();
-        const responseMain = await fetch(product_URL, {
-            method: "GET", headers: { Authorization: `Bearer ${apigeeAuth}`, },
+        const responseMain = await fetch(buildApigeeProductUrl(productRow.product_name), {
+            method: "GET", headers: { Authorization: `Bearer ${apigeeAuth}` },
         });
         const data = await responseMain.json();
-        if (responseMain.status == 200) {
-            if (data?.operationGroup?.operationConfigs) {
-                let proxy_database_list = [];
 
-                for (const product of data.operationGroup.operationConfigs) {
-                    const response = JSON.stringify(data.operationGroup.operationConfigs);
-                    const proxy_name = product.apiSource;
-                    const proxyRow = await Proxies.findOne({
-                        where: { proxy_name: proxy_name, product_id: product_id },
-                        attributes: ['proxy_id', 'proxy_name', 'is_deleted'],
-                        raw: true
-                    });
-                    if (proxyRow) {
-                        const proxy_id = proxyRow.proxy_id;
-                        let proxy_exist = false;
-                        for (const element of proxy_database_list) {
-                            if (element.id && element.id == proxy_id) {
-                                proxy_exist = true; break;
-                            }
-                        }
-                        if (!proxy_exist) {
-                            proxy_database_list.push({ id: proxy_id, ids: [] });
-                        }
-
-                        if (proxyRow.is_deleted) {
-                            await Proxies.update(
-                                { is_deleted: false },
-                                { where: { proxy_id: proxy_id } }
-                            );
-                        }
-
-                        const endpoint_url = product.operations[0].resource;
-                        console.log(product);
-                        const endpoint_methods = product.operations[0].methods;
-                        const endpointRow = await Endpoint.findOne({
-                            where: { endpoint_url: endpoint_url, proxy_id: proxy_id },
-                            attributes: ['proxy_id', 'endpoint_url', 'endpoint_id', 'is_deleted'],
-                            raw: true
-                        });
-                        if (endpointRow) {
-                            addEndpointToProxyList(proxy_database_list, proxy_id, endpointRow.endpoint_id);
-                            if (endpointRow.endpoint_id && endpointRow.endpoint_id > 0) {
-                                await Endpoint.update(
-                                    { methods: endpoint_methods },
-                                    { where: { endpoint_id: endpointRow.endpoint_id } }
-                                );
-                            }
-
-                            if (endpointRow.is_deleted) {
-                                await Endpoint.update(
-                                    { is_deleted: false },
-                                    { where: { endpoint_id: endpointRow.endpoint_id } }
-                                );
-                            }
-                            console.log(`${proxy_name} is already exists.`);
-                        }
-                        else {
-                            const newEndpoint = await Endpoint.create({
-                                product_id: product_id,
-                                proxy_id: proxy_id,
-                                endpoint_url: endpoint_url,
-                                json_data: response,
-                                added_by: req.token_data.account_id,
-                                added_date: db.get_ist_current_date(),
-                                methods: endpoint_methods
-                            });
-                            const endpoint_id = newEndpoint?.endpoint_id ?? 0;
-                            if (endpoint_id > 0) {
-                                addEndpointToProxyList(proxy_database_list, proxy_id, endpoint_id);
-                                console.log(`${endpoint_url} saved successfully.`);
-                            } else {
-                                console.log(`Unable to save ${endpoint_url}, please try again.`);
-                            }
-                        }
-                    }
-                    else {
-                        const newProxy = await Proxies.create({
-                            product_id: product_id,
-                            proxy_name: proxy_name,
-                            added_by: req.token_data.account_id,
-                            added_date: db.get_ist_current_date(),
-                            json_data: response
-                        });
-                        const proxy_id = newProxy?.proxy_id ?? 0;
-                        if (proxy_id > 0) {
-                            proxy_database_list.push({ id: proxy_id, ids: [] });
-                            const endpoint_url = product.operations[0].resource;
-                            const _methods = product.operations[0].methods;
-                            const endpoint_methods = _methods.join("|");
-                            const endpointRow2 = await Endpoint.findOne({
-                                where: { endpoint_url: endpoint_url, proxy_id: proxy_id },
-                                attributes: ['proxy_id', 'endpoint_url', 'endpoint_id', 'is_deleted'],
-                                raw: true
-                            });
-                            if (endpointRow2) {
-                                addEndpointToProxyList(proxy_database_list, proxy_id, endpointRow2.endpoint_id);
-                                if (endpointRow2.endpoint_id && endpointRow2.endpoint_id > 0) {
-                                    await Endpoint.update(
-                                        { methods: endpoint_methods },
-                                        { where: { endpoint_id: endpointRow2.endpoint_id } }
-                                    );
-                                }
-
-                                if (endpointRow2.is_deleted) {
-                                    await Endpoint.update(
-                                        { is_deleted: false },
-                                        { where: { endpoint_id: endpointRow2.endpoint_id } }
-                                    );
-                                }
-
-                                console.log(`${proxy_name} is already exists.`);
-                            }
-                            else {
-                                const newEndpoint2 = await Endpoint.create({
-                                    product_id: product_id,
-                                    proxy_id: proxy_id,
-                                    endpoint_url: endpoint_url,
-                                    json_data: response,
-                                    added_by: req.token_data.account_id,
-                                    added_date: db.get_ist_current_date(),
-                                    methods: endpoint_methods
-                                });
-                                const endpoint_id = newEndpoint2?.endpoint_id ?? 0;
-                                if (endpoint_id > 0) {
-
-                                    addEndpointToProxyList(proxy_database_list, proxy_id, endpoint_id);
-
-                                    console.log(`${endpoint_url} saved successfully.`);
-                                } else {
-                                    console.log(`Unable to save ${endpoint_url}, please try again.`);
-                                }
-                            }
-                        } else {
-                            console.log(`Unable to save ${proxy_name}, please try again.`);
-                        }
-                    }
-                }
-
-                let tmp_proxies = [];
-                for (const proxyDbItem of proxy_database_list) {
-                    tmp_proxies.push(proxyDbItem.id);
-                }
-                if (tmp_proxies && tmp_proxies.length > 0) {
-                    await Proxies.update(
-                        { is_published: false, is_deleted: true },
-                        { where: { product_id: _product_id, proxy_id: { [Op.notIn]: tmp_proxies } } }
-                    );
-                } else {
-                    await Proxies.update(
-                        { is_published: false, is_deleted: true },
-                        { where: { product_id: _product_id } }
-                    );
-                }
-                for (const proxyDbItem of proxy_database_list) {
-                    const _tmpID = proxyDbItem.id;
-                    const _tmpIDs = proxyDbItem.ids;
-                    if (_tmpIDs && _tmpIDs.length > 0) {
-                        await Endpoint.update(
-                            { is_published: false, is_deleted: true },
-                            { where: { proxy_id: _tmpID, endpoint_id: { [Op.notIn]: _tmpIDs } } }
-                        );
-                    } else {
-                        await Endpoint.update(
-                            { is_published: false, is_deleted: true },
-                            { where: { proxy_id: _tmpID } }
-                        );
-                    }
-                }
-                try {
-                    let data_to_log = {
-                        correlation_id: correlator.getId(),
-                        token_id: req.token_data.token_id,
-                        account_id: req.token_data.account_id,
-                        user_type: 1,
-                        user_id: req.token_data.admin_id,
-                        narration: 'Product proxies pull from apigee ' + product_name,
-                        query: '',
-                        date_time: db.get_ist_current_date(),
-                    }
-                    action_logger.info(JSON.stringify(data_to_log));
-                } catch (_) { }
-                return res.status(200).json(success(true, res.statusCode, "Product proxies saved successfully.", null));
-            }
-            else {
-                return res.status(200).json(success(false, res.statusCode, "Proxy not found for this product.", null));
-            }
+        if (responseMain.status !== 200) {
+            const errorMsg = data?.error?.message || 'Unknown error';
+            return res.status(200).json(success(false, res.statusCode, "Apigee response : " + errorMsg, null));
         }
-        else if (data?.error?.message?.length > 0) {
-            return res.status(200).json(success(false, res.statusCode, "Apigee response : " + data.error.message, null));
+
+        if (!data?.operationGroup?.operationConfigs) {
+            return res.status(200).json(success(false, res.statusCode, "Proxy not found for this product.", null));
         }
-        else {
-            return res.status(200).json(success(false, res.statusCode, "Apigee response : " + data.error.message, null));
+
+        const proxy_database_list = [];
+        const json_data = JSON.stringify(data.operationGroup.operationConfigs);
+        const params = { product_id: _product_id, json_data, account_id: req.token_data.account_id };
+
+        for (const operationData of data.operationGroup.operationConfigs) {
+            await processOperationConfig(Proxies, Endpoint, proxy_database_list, operationData, params);
         }
+
+        await cleanupStaleProxiesAndEndpoints(Proxies, Endpoint, _product_id, proxy_database_list);
+        logAction(req, 'Product proxies pull from apigee ' + productRow.product_name, '');
+        return res.status(200).json(success(true, res.statusCode, "Product proxies saved successfully.", null));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
@@ -830,7 +745,6 @@ const product_detail_update = async (req, res, next) => {
         // Upload files using helper
         const product_iconFilename = await uploadFileAndGetUrl(req.files, 'product_icon', 'product_icon/');
         const product_open_specname = await uploadFileAndGetUrl(req.files, 'product_open_spec', 'product_data/');
-        const flow_chartFilename = await uploadFileAndGetUrl(req.files, 'flow_chart', 'product_data/');
         const product_open_api_json = await uploadFileAndGetUrl(req.files, 'product_open_spec_json', 'product_data/');
         const product_documentation_pdf_name = await uploadFileAndGetUrl(req.files, 'product_documentation_pdf', 'product_data/');
 
@@ -1017,18 +931,68 @@ const product_image_delete = async (req, res, next) => {
     }
 };
 
+// Helper to update existing product
+const updateExistingProductName = async (req, res, Product, _product_id, product_name) => {
+    const productRow = await Product.findOne({
+        where: { product_id: _product_id, is_deleted: false },
+        attributes: ['product_id', 'is_manual', 'product_name'],
+        raw: true
+    });
+    if (!productRow) {
+        return res.status(200).json(success(false, res.statusCode, "Product details not found, Please try again.", null));
+    }
+    if (!productRow.is_manual) {
+        return res.status(200).json(success(false, res.statusCode, "Only manually added product can be edited.", null));
+    }
+
+    const [affectedRows] = await Product.update(
+        { product_name, modify_by: req.token_data.account_id, modify_date: db.get_ist_current_date() },
+        { where: { product_id: _product_id } }
+    );
+    if (affectedRows <= 0) {
+        return res.status(200).json(success(false, res.statusCode, "Unable to update, Please try again", null));
+    }
+
+    const narration = productRow.product_name === product_name ? product_name : `${productRow.product_name} to ${product_name}`;
+    logAction(req, 'API product updated. Product name: ' + narration, `Product.update({ product_name: '${product_name}' }, { where: { product_id: ${_product_id} }})`);
+    return res.status(200).json(success(true, res.statusCode, "Updated successfully.", null));
+};
+
+// Helper to create new product with proxy
+const createNewProductWithProxy = async (req, res, Product, Proxies, product_name) => {
+    const newProduct = await Product.create({
+        product_name, added_by: req.token_data.account_id, modify_by: req.token_data.account_id,
+        added_date: db.get_ist_current_date(), modify_date: db.get_ist_current_date(), is_manual: true
+    });
+    const new_product_id = newProduct?.product_id ?? 0;
+
+    if (new_product_id <= 0) {
+        return res.status(200).json(success(false, res.statusCode, "Unable to save, Please try again", null));
+    }
+
+    const newProxy = await Proxies.create({
+        product_id: new_product_id, proxy_name: product_name,
+        added_by: req.token_data.account_id, added_date: db.get_ist_current_date(), is_manual: true
+    });
+
+    if ((newProxy?.proxy_id ?? 0) > 0) {
+        logAction(req, 'New product added. Product name: ' + product_name, `Product.create({ product_name: '${product_name}' })`);
+    }
+    return res.status(200).json(success(true, res.statusCode, "Added Successfully.", null));
+};
+
 const product_set_new = async (req, res, next) => {
     const { product_id, product_name } = req.body;
     const { Product, Proxies } = db.models;
     try {
         const _product_id = parseNumericWithDefault(product_id);
 
-        if (!product_name || product_name.length <= 0) {
+        if (!product_name?.length) {
             return res.status(200).json(success(false, res.statusCode, "Please enter Product name.", null));
         }
 
         const existingProduct = await Product.findOne({
-            where: { product_id: { [Op.ne]: _product_id }, product_name: product_name, is_deleted: false },
+            where: { product_id: { [Op.ne]: _product_id }, product_name, is_deleted: false },
             attributes: ['product_id'],
             raw: true
         });
@@ -1036,53 +1000,10 @@ const product_set_new = async (req, res, next) => {
             return res.status(200).json(success(false, API_STATUS.ALREADY_EXISTS.value, "Product name is already exists.", null));
         }
 
-        // Update existing product
         if (_product_id > 0) {
-            const productRow = await Product.findOne({
-                where: { product_id: _product_id, is_deleted: false },
-                attributes: ['product_id', 'is_manual', 'product_name'],
-                raw: true
-            });
-            if (!productRow) {
-                return res.status(200).json(success(false, res.statusCode, "Product details not found, Please try again.", null));
-            }
-            if (!Boolean(productRow.is_manual)) {
-                return res.status(200).json(success(false, res.statusCode, "Only manually added product can be edited.", null));
-            }
-
-            const [affectedRows] = await Product.update(
-                { product_name, modify_by: req.token_data.account_id, modify_date: db.get_ist_current_date() },
-                { where: { product_id: _product_id } }
-            );
-            if (affectedRows <= 0) {
-                return res.status(200).json(success(false, res.statusCode, "Unable to update, Please try again", null));
-            }
-
-            logAction(req, 'API product updated. Product name: ' + (productRow.product_name == product_name ? product_name : productRow.product_name + ' to ' + product_name),
-                `Product.update({ product_name: '${product_name}' }, { where: { product_id: ${_product_id} }})`);
-            return res.status(200).json(success(true, res.statusCode, "Updated successfully.", null));
+            return updateExistingProductName(req, res, Product, _product_id, product_name);
         }
-
-        // Create new product
-        const newProduct = await Product.create({
-            product_name, added_by: req.token_data.account_id, modify_by: req.token_data.account_id,
-            added_date: db.get_ist_current_date(), modify_date: db.get_ist_current_date(), is_manual: true
-        });
-        const new_product_id = newProduct?.product_id ?? 0;
-
-        if (new_product_id <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Unable to save, Please try again", null));
-        }
-
-        const newProxy = await Proxies.create({
-            product_id: new_product_id, proxy_name: product_name,
-            added_by: req.token_data.account_id, added_date: db.get_ist_current_date(), is_manual: true
-        });
-
-        if ((newProxy?.proxy_id ?? 0) > 0) {
-            logAction(req, 'New product added. Product name: ' + product_name, `Product.create({ product_name: '${product_name}' })`);
-        }
-        return res.status(200).json(success(true, res.statusCode, "Added Successfully.", null));
+        return createNewProductWithProxy(req, res, Product, Proxies, product_name);
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
@@ -1862,7 +1783,7 @@ const manual_endpoint_set = async (req, res, next) => {
             if (!row3 || row3.length <= 0) {
                 return res.status(200).json(success(false, res.statusCode, "endpoints details not found, Please try again.", null));
             }
-            if (!Boolean(row3[0].is_manual)) {
+            if (!row3[0].is_manual) {
                 return res.status(200).json(success(false, res.statusCode, "Only manually added endpoint can be edited.", null));
             }
 
@@ -2070,65 +1991,8 @@ const dropdown_products = async (req, res, next) => {
     }
 };
 
-const apigee_product_rate_add = async (req, res, next) => {
-    const { product_id, product_rate_value } = req.body;
-    try {
-        const _product_id = parseNumericWithDefault(product_id);
-
-        if (!product_rate_value || product_rate_value.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter product rate value.", null));
-        }
-
-        const _query1 = `SELECT product_id, product_name FROM product WHERE product_id = ? AND is_deleted = false`;
-        const row1 = await db.sequelize.query(_query1, { replacements: [_product_id], type: QueryTypes.SELECT });
-        if (!row1 || row1.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Product details not found.", null));
-        }
-
-        const product_name = row1[0].product_name;
-        if (!product_name || product_name.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Product details not found.", null));
-        }
-
-        const data = {
-            attribute: [{ name: "rateMultiper-" + product_name, value: product_rate_value }],
-        };
-
-        const product_URL = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/apiproducts/${product_name}/attributes`;
-        const apigeeAuth = await db.get_apigee_token();
-        const response = await fetch(product_URL, {
-            method: "POST",
-            headers: { Authorization: `Bearer ${apigeeAuth}`, "Content-Type": "application/json" },
-            body: JSON.stringify(data),
-        });
-        const responseData = await response.json();
-
-        if (!responseData) {
-            return res.status(200).json(success(false, res.statusCode, "Unable to Add Rate, Please try again.", null));
-        }
-
-        if (responseData?.error?.message?.length > 0) {
-            return res.status(200).json(success(false, res.statusCode, `Apigee response : ${responseData?.error?.message ?? 'Unknown error'}`, null));
-        }
-
-        const rate_plan_response = JSON.stringify(responseData);
-        const _query2 = `UPDATE product SET rate_plan_value = ?, rate_plan_added_by = ?, rate_added_date = ?, rate_plan_json_data = ? WHERE product_id = ?`;
-        const _replacements2 = [product_rate_value, req.token_data.account_id, db.get_ist_current_date(), rate_plan_response, _product_id];
-        const [, i] = await db.sequelize.query(_query2, { replacements: _replacements2, type: QueryTypes.UPDATE });
-
-        if (i <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Unable to Add Rate, Please try again.", null));
-        }
-
-        logAction(req, 'Product Rate added  Product name = ' + product_name + ', Product Value = ' + product_rate_value,
-            db.buildQuery_Array(_query2, _replacements2));
-        return res.status(200).json(success(true, res.statusCode, "Product Rate Added successfully.", null));
-    } catch (err) {
-        _logger.error(err.stack);
-        return res.status(500).json(success(false, res.statusCode, err.message, null));
-    }
-};
-
+// apigee_product_rate_add is an alias for product_apigee_rate_add (same functionality)
+const apigee_product_rate_add = product_apigee_rate_add;
 
 export default {
     api_products_list,
