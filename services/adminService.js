@@ -1,6 +1,6 @@
 import { logger as _logger, action_logger } from '../logger/winston.js';
 import db from '../database/db_helper.js';
-import { Op, fn, col, literal } from 'sequelize';
+import { Op} from 'sequelize';
 import { success } from '../model/responseModel.js';
 import { API_STATUS } from '../model/enumModel.js';
 import bcrypt from 'bcryptjs';
@@ -12,11 +12,81 @@ import validator from 'validator';
 import requestIp from 'request-ip';
 import admUsersService from './admin/admUsersService.js';
 import supportTransporter from './supportService.js';
-import excel from 'exceljs';
 import correlator from 'express-correlation-id';
 
 // Helper to get models
 const getModels = () => db.models;
+
+// Helper to log user actions
+const logUserAction = (req, narration, query = 'ORM Update') => {
+    try {
+        const data_to_log = {
+            correlation_id: correlator.getId(),
+            token_id: req.token_data.token_id,
+            account_id: req.token_data.account_id,
+            user_type: 1,
+            user_id: req.token_data.admin_id,
+            narration,
+            query,
+            date_time: db.get_ist_current_date(),
+        };
+        action_logger.info(JSON.stringify(data_to_log));
+    } catch (_) { }
+};
+
+// Helper to update category
+const updateCategory = async (FeedbackCategory, categoryId, categoryName, req) => {
+    const [affectedRows] = await FeedbackCategory.update(
+        {
+            category_name: categoryName,
+            modify_by: req.token_data.account_id,
+            modify_date: db.get_ist_current_date()
+        },
+        { where: { category_id: categoryId } }
+    );
+    return affectedRows > 0;
+};
+
+// Helper to create category
+const createCategory = async (FeedbackCategory, categoryName, req) => {
+    const newCategory = await FeedbackCategory.create({
+        category_name: categoryName,
+        is_enabled: true,
+        is_deleted: false,
+        added_by: req.token_data.account_id,
+        modify_by: req.token_data.account_id,
+        added_date: db.get_ist_current_date(),
+        modify_date: db.get_ist_current_date()
+    });
+    return newCategory.category_id > 0;
+};
+
+// Helper to get user permissions
+const getUserPermissions = async (user) => {
+    const { AdmPermission, AdmRolePermission } = getModels();
+
+    if (user.is_master) {
+        const allPermissions = await AdmPermission.findAll({
+            attributes: ['permission_id']
+        });
+        return allPermissions.map(p => ({ id: p.permission_id, status: true }));
+    }
+
+    const allPermissions = await AdmPermission.findAll({
+        attributes: ['permission_id'],
+        include: [{
+            model: AdmRolePermission,
+            as: 'rolePermissions',
+            where: { role_id: user.role_id },
+            required: false,
+            attributes: ['is_allowed']
+        }]
+    });
+    return allPermissions.map(p => ({
+        id: p.permission_id,
+        status: p.rolePermissions?.length > 0 ? p.rolePermissions[0].is_allowed : false
+    }));
+};
 
 const login = async (req, res, next) => {
     const { post_data } = req.body;
@@ -35,7 +105,7 @@ const login = async (req, res, next) => {
             return res.status(200).json(success(false, res.statusCode, "Please enter password.", null));
         }
 
-        const { AdmUser, AdmToken, AdmPermission, AdmRolePermission, AdmRole } = getModels();
+        const { AdmUser, AdmToken, AdmRole } = getModels();
 
         // Find user by email with role
         const user = await AdmUser.findOne({
@@ -63,10 +133,8 @@ const login = async (req, res, next) => {
             return res.status(200).json(success(false, res.statusCode, "Invalid username or password.", null));
         }
 
-        if (!user.is_master) {
-            if (!user.is_enabled) {
-                return res.status(200).json(success(false, res.statusCode, "Your account has been blocked, contact system administrator.", null));
-            }
+        if (!user.is_master && !user.is_enabled) {
+            return res.status(200).json(success(false, res.statusCode, "Your account has been blocked, contact system administrator.", null));
         }
 
         const jwtUser = { id: user.admin_id }
@@ -93,40 +161,14 @@ const login = async (req, res, next) => {
             user_agent: user_agent
         });
 
-        const token_id = newToken.token_id;
+        // const token_id = newToken.token_id;
         const unique_id = newToken.unique_id;
 
         if (process.env.REDIS_ENABLED > 0) {
             await redisDB.set(unique_id, refreshToken, { EX: process.env.REDIS_CACHE_EXPIRY });
         }
 
-        let permissions = [];
-        if (user.is_master && user.is_master == true) {
-            // Master user gets all permissions
-            const allPermissions = await AdmPermission.findAll({
-                attributes: ['permission_id']
-            });
-            permissions = allPermissions.map(p => ({
-                id: p.permission_id,
-                status: true
-            }));
-        } else {
-            // Get permissions based on role
-            const allPermissions = await AdmPermission.findAll({
-                attributes: ['permission_id'],
-                include: [{
-                    model: AdmRolePermission,
-                    as: 'rolePermissions',
-                    where: { role_id: user.role_id },
-                    required: false,
-                    attributes: ['is_allowed']
-                }]
-            });
-            permissions = allPermissions.map(p => ({
-                id: p.permission_id,
-                status: p.rolePermissions && p.rolePermissions.length > 0 ? p.rolePermissions[0].is_allowed : false
-            }));
-        }
+        const permissions = await getUserPermissions(user);
 
         const results = {
             first_name: user.first_name,
@@ -214,7 +256,7 @@ const token_data = async (unique_id) => {
         }]
     });
 
-    if (!token || !token.user) return [];
+    if (!token?.user) return [];
 
     return [{
         token_id: token.token_id,
@@ -266,20 +308,19 @@ const reset_pass = async (req, res, next) => {
             attributes: ['admin_id', 'is_activated']
         });
 
-        if (user) {
-            if (user.is_activated && user.is_activated == true) {
-                const i = await admUsersService.send_reset_link(user.admin_id);
-                if (i > 0) {
-                    return res.status(200).json(success(true, res.statusCode, "Reset password link has been sent on your email address.", null));
-                } else {
-                    return res.status(200).json(success(false, res.statusCode, "Reset password link sending failure, Please try again.", null));
-                }
-            } else {
-                return res.status(200).json(success(false, res.statusCode, "Your account is not yet activated, Please contact to administrator.", null));
-            }
-        } else {
+        if (!user) {
             return res.status(200).json(success(false, res.statusCode, "Email id/User name is not registered with us.", null));
         }
+
+        if (!user.is_activated) {
+            return res.status(200).json(success(false, res.statusCode, "Your account is not yet activated, Please contact to administrator.", null));
+        }
+
+        const i = await admUsersService.send_reset_link(user.admin_id);
+        if (i > 0) {
+            return res.status(200).json(success(true, res.statusCode, "Reset password link has been sent on your email address.", null));
+        }
+        return res.status(200).json(success(false, res.statusCode, "Reset password link sending failure, Please try again.", null));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
@@ -540,9 +581,9 @@ const contact_us_add_reply = async (req, res, next) => {
         if (newReply.feedback_id > 0) {
             const formattedDate = feedback.added_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(feedback.added_date)).toString() : "";
 
-            let body_text = `<div style=\"width: 100%; line-height: 20px;  margin: 0 auto; padding: 15px; font-size: 13px; color: #353434;\">
+            let body_text = `<div style="width: 100%; line-height: 20px;  margin: 0 auto; padding: 15px; font-size: 13px; color: #353434;">
              Hi ${feedback.first_name},<br />  ${message} <br/> <br/> <div>Thank you.</div> <div>The Protean Team </div> </div>
-             <div style=\"width: 100%; line-height: 20px;  margin: 0 auto; border-top: 1px dotted black; padding: 15px; font-family: Trebuchet MS; font-size: 13px; color: #353434;\">
+             <div style="width: 100%; line-height: 20px;  margin: 0 auto; border-top: 1px dotted black; padding: 15px; font-family: Trebuchet MS; font-size: 13px; color: #353434;">
              ${feedback.first_name} wrote on ${formattedDate} <br/>  <br/> ${feedback.message} . <br/>  <br/> </div>`;
 
             let _subject = "Ticket: " + feedback.ticket_id + "- Re: " + feedback.subject;
@@ -581,7 +622,7 @@ const contact_us_add_reply = async (req, res, next) => {
 };
 
 const contact_us_category = async (req, res, next) => {
-    const { page_no, search_text } = req.body;
+    // const { page_no, search_text } = req.body;
     try {
         const { FeedbackCategory } = getModels();
 
@@ -641,7 +682,7 @@ const contact_us_category_toggle = async (req, res, next) => {
                     account_id: req.token_data.account_id,
                     user_type: 1,
                     user_id: req.token_data.admin_id,
-                    narration: 'Contact us Category ' + (category.is_enabled == true ? 'disabled' : 'enabled') + '. Category name = ' + category.category_name,
+                    narration: 'Contact us Category ' + (category.is_enabled ? 'disabled' : 'enabled') + '. Category name = ' + category.category_name,
                     query: 'ORM Update',
                     date_time: db.get_ist_current_date(),
                 }
@@ -711,16 +752,15 @@ const contact_us_category_delete = async (req, res, next) => {
 }
 
 const contact_us_category_set = async (req, res, next) => {
-    const { category_id, category_name, sort_order } = req.body;
+    const { category_id, category_name } = req.body;
     try {
-        let _category_id = category_id && validator.isNumeric(category_id.toString()) ? parseInt(category_id) : 0;
+        const _category_id = category_id && validator.isNumeric(category_id.toString()) ? parseInt(category_id) : 0;
         const { FeedbackCategory } = getModels();
 
         if (!category_name || category_name.length <= 0) {
             return res.status(200).json(success(false, res.statusCode, "Please enter category name.", null));
         }
 
-        // Check if category name already exists
         const existingCategory = await FeedbackCategory.findOne({
             where: {
                 category_id: { [Op.ne]: _category_id },
@@ -733,67 +773,17 @@ const contact_us_category_set = async (req, res, next) => {
             return res.status(200).json(success(false, res.statusCode, "category name is already exists.", null));
         }
 
-        if (_category_id > 0) {
-            // Update existing category
-            const [affectedRows] = await FeedbackCategory.update(
-                {
-                    category_name: category_name,
-                    modify_by: req.token_data.account_id,
-                    modify_date: db.get_ist_current_date()
-                },
-                { where: { category_id: _category_id } }
-            );
+        const isUpdate = _category_id > 0;
+        const isSuccess = isUpdate
+            ? await updateCategory(FeedbackCategory, _category_id, category_name, req)
+            : await createCategory(FeedbackCategory, category_name, req);
 
-            if (affectedRows > 0) {
-                try {
-                    let data_to_log = {
-                        correlation_id: correlator.getId(),
-                        token_id: req.token_data.token_id,
-                        account_id: req.token_data.account_id,
-                        user_type: 1,
-                        user_id: req.token_data.admin_id,
-                        narration: 'category updated. category name = ' + category_name,
-                        query: 'ORM Update',
-                        date_time: db.get_ist_current_date(),
-                    }
-                    action_logger.info(JSON.stringify(data_to_log));
-                } catch (_) { }
-
-                return res.status(200).json(success(true, res.statusCode, "Updated successfully.", null));
-            } else {
-                return res.status(200).json(success(false, res.statusCode, "Unable to update, Please try again", null));
-            }
-        } else {
-            // Create new category
-            const newCategory = await FeedbackCategory.create({
-                category_name: category_name,
-                is_enabled: true,
-                is_deleted: false,
-                added_by: req.token_data.account_id,
-                modify_by: req.token_data.account_id,
-                added_date: db.get_ist_current_date(),
-                modify_date: db.get_ist_current_date()
-            });
-
-            if (newCategory.category_id > 0) {
-                try {
-                    let data_to_log = {
-                        correlation_id: correlator.getId(),
-                        token_id: req.token_data.token_id,
-                        account_id: req.token_data.account_id,
-                        user_type: 1,
-                        user_id: req.token_data.admin_id,
-                        narration: 'New category added. Category name ' + category_name,
-                        query: 'ORM Create',
-                        date_time: db.get_ist_current_date(),
-                    }
-                    action_logger.info(JSON.stringify(data_to_log));
-                } catch (_) { }
-                return res.status(200).json(success(true, res.statusCode, "Saved successfully.", null));
-            } else {
-                return res.status(200).json(success(false, res.statusCode, "Unable to save, Please try again", null));
-            }
+        if (!isSuccess) {
+            return res.status(200).json(success(false, res.statusCode, isUpdate ? "Unable to update, Please try again" : "Unable to save, Please try again", null));
         }
+
+        logUserAction(req, isUpdate ? `category updated. category name = ${category_name}` : `New category added. Category name ${category_name}`, isUpdate ? 'ORM Update' : 'ORM Create');
+        return res.status(200).json(success(true, res.statusCode, isUpdate ? "Updated successfully." : "Saved successfully.", null));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
@@ -831,72 +821,40 @@ const settings_update = async (req, res, next) => {
         const copyright = req.body.copyright;
         const { Settings } = getModels();
 
-        let logo_image_filename = "";
-        if (logo_image) {
-            logo_image_filename = req.files['logo_image'][0].filename;
-        }
-
+        const logo_image_filename = logo_image ? req.files['logo_image'][0].filename : "";
         const existingSettings = await Settings.findOne();
 
-        if (existingSettings) {
-            const updateData = {
-                copyright: copyright,
-                modify_by: req.token_data.account_id,
-                modify_date: db.get_ist_current_date()
-            };
-            if (logo_image_filename.length > 0) {
-                updateData.logo_path = logo_image_filename;
-            }
+        let isSuccess = false;
+        let isUpdate = false;
 
+        if (existingSettings) {
+            isUpdate = true;
+            const updateData = {
+                copyright,
+                modify_by: req.token_data.account_id,
+                modify_date: db.get_ist_current_date(),
+                ...(logo_image_filename && { logo_path: logo_image_filename })
+            };
             const [affectedRows] = await Settings.update(updateData, {
                 where: { table_id: existingSettings.table_id }
             });
-
-            if (affectedRows > 0) {
-                try {
-                    let data_to_log = {
-                        correlation_id: correlator.getId(),
-                        token_id: req.token_data.token_id,
-                        account_id: req.token_data.account_id,
-                        user_type: 1,
-                        user_id: req.token_data.admin_id,
-                        narration: 'Setting updated.',
-                        query: 'ORM Update',
-                        date_time: db.get_ist_current_date(),
-                    }
-                    action_logger.info(JSON.stringify(data_to_log));
-                } catch (_) { }
-                return res.status(200).json(success(true, res.statusCode, "Settings updated successfully.", null));
-            } else {
-                return res.status(200).json(success(false, res.statusCode, "Unable to save, Please try again.", null));
-            }
+            isSuccess = affectedRows > 0;
         } else {
             const newSettings = await Settings.create({
                 logo_path: logo_image_filename,
-                copyright: copyright,
+                copyright,
                 modify_by: req.token_data.account_id,
                 modify_date: db.get_ist_current_date()
             });
-
-            if (newSettings) {
-                try {
-                    let data_to_log = {
-                        correlation_id: correlator.getId(),
-                        token_id: req.token_data.token_id,
-                        account_id: req.token_data.account_id,
-                        user_type: 1,
-                        user_id: req.token_data.admin_id,
-                        narration: 'Setting updated.',
-                        query: 'ORM Create',
-                        date_time: db.get_ist_current_date(),
-                    }
-                    action_logger.info(JSON.stringify(data_to_log));
-                } catch (_) { }
-                return res.status(200).json(success(true, res.statusCode, "Settings added successfully.", null));
-            } else {
-                return res.status(200).json(success(false, res.statusCode, "Unable to save, Please try again.", null));
-            }
+            isSuccess = !!newSettings;
         }
+
+        if (!isSuccess) {
+            return res.status(200).json(success(false, res.statusCode, "Unable to save, Please try again.", null));
+        }
+
+        logUserAction(req, 'Setting updated.', isUpdate ? 'ORM Update' : 'ORM Create');
+        return res.status(200).json(success(true, res.statusCode, isUpdate ? "Settings updated successfully." : "Settings added successfully.", null));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
@@ -994,7 +952,7 @@ const customer_auto_approve = async (req, res, next) => {
                     account_id: req.token_data.account_id,
                     user_type: 1,
                     user_id: req.token_data.admin_id,
-                    narration: 'Customer auto approved ' + (settings.is_auto_approve_customer == true ? 'disabled' : 'enabled') + '.',
+                    narration: 'Customer auto approved ' + (settings.is_auto_approve_customer ? 'disabled' : 'enabled') + '.',
                     query: 'ORM Update',
                     date_time: db.get_ist_current_date(),
                 }
@@ -1063,7 +1021,7 @@ const verify_reset_pass = async (req, res, next) => {
         if (!hasNumber.test(password)) {
             return res.status(200).json(success(false, res.statusCode, "The password must contain a number.", null));
         }
-        const specialChars = /[`!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?~]/;
+        const specialChars = /[`!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?~]/;
         if (!specialChars.test(password)) {
             return res.status(200).json(success(false, res.statusCode, "The password must contain a special character.", null));
         }
@@ -1161,7 +1119,7 @@ const set_new_pass = async (req, res, next) => {
         if (!hasNumber.test(password)) {
             return res.status(200).json(success(false, res.statusCode, "The password must contain a number.", null));
         }
-        const specialChars = /[`!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?~]/;
+        const specialChars = /[`!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?~]/;
         if (!specialChars.test(password)) {
             return res.status(200).json(success(false, res.statusCode, "The password must contain a special character.", null));
         }
@@ -1283,24 +1241,14 @@ const lable_info_set = async (req, res, next) => {
 
 const Api_Check = async (req, res, next) => {
     try {
-        let _subject = "This is test subject";
-        let body_text = "This is test Message";
-        let mailOptions = {
+        const mailOptions = {
             from: process.env.EMAIL_SUPPORT_EMAIL,
             to: "nitin@velociters.com",
-            subject: _subject,
-            html: body_text,
-        }
-        let is_success = false;
-        try {
-            await supportTransporter.sendMail(mailOptions);
-            is_success = true;
-        } catch (err) {
-            _logger.error(err.stack);
-            return res.status(500).json(success(false, res.statusCode, err.message, null));
-        }
-        return res.status(200).json(success(true, res.statusCode, "Massage sent successfully.", null));
-
+            subject: "This is test subject",
+            html: "This is test Message",
+        };
+        await supportTransporter.sendMail(mailOptions);
+        return res.status(200).json(success(true, res.statusCode, "Message sent successfully.", null));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));

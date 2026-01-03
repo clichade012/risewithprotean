@@ -1,4 +1,5 @@
 import winston from 'winston';
+import 'winston-daily-rotate-file';
 import 'winston-mongodb';
 import correlator from 'express-correlation-id';
 
