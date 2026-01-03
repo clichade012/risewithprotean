@@ -96,28 +96,31 @@ const contact_us_form = async (req, res, next) => {
     }
 };
 
-// Helper to validate contact form fields
+// Helper to parse numeric ID from input
+const parseNumericId = (value) => {
+    return (value && validator.isNumeric(value.toString())) ? parseInt(value) : 0;
+};
+
+// Helper to validate contact form fields - returns { error, _category_id, _network_id }
 const validateContactForm = (data) => {
     const { first_name, last_name, email_id, company_name, category_id, network_id, mobile_no, subject, message } = data;
+    const _category_id = parseNumericId(category_id);
+    const _network_id = parseNumericId(network_id);
 
-    if (!first_name?.length) return "Please enter first name.";
-    if (!last_name?.length) return "Please enter last name.";
-    if (!email_id?.length) return "Please enter email address.";
-    if (!validator.isEmail(email_id)) return "Please enter correct email address.";
-    if (!company_name?.length) return "Please enter company name.";
+    let error = null;
+    if (!first_name?.length) error = "Please enter first name.";
+    else if (!last_name?.length) error = "Please enter last name.";
+    else if (!email_id?.length) error = "Please enter email address.";
+    else if (!validator.isEmail(email_id)) error = "Please enter correct email address.";
+    else if (!company_name?.length) error = "Please enter company name.";
+    else if (_category_id <= 0) error = "Please select issue type.";
+    else if (_network_id <= 0) error = "Please select country code.";
+    else if (!mobile_no?.length) error = "Please enter mobile number.";
+    else if (!validator.isNumeric(mobile_no) || mobile_no.length !== 10) error = "Please enter correct mobile number.";
+    else if (!subject?.length) error = "Please enter subject.";
+    else if (!message?.length) error = "Please enter message.";
 
-    const _category_id = (category_id && validator.isNumeric(category_id.toString())) ? parseInt(category_id) : 0;
-    if (_category_id <= 0) return "Please select issue type.";
-
-    const _network_id = (network_id && validator.isNumeric(network_id.toString())) ? parseInt(network_id) : 0;
-    if (_network_id <= 0) return "Please select country code.";
-
-    if (!mobile_no?.length) return "Please enter mobile number.";
-    if (!validator.isNumeric(mobile_no) || mobile_no.length !== 10) return "Please enter correct mobile number.";
-    if (!subject?.length) return "Please enter subject.";
-    if (!message?.length) return "Please enter message.";
-
-    return { valid: true, _category_id, _network_id };
+    return { error, _category_id, _network_id };
 };
 
 // Helper to send contact us confirmation email
@@ -152,11 +155,10 @@ const contact_us_save = async (req, res, next) => {
     try {
         const { FeedbackCategory, EmailTemplate } = getModels();
 
-        const validation = validateContactForm(req.body);
-        if (typeof validation === 'string') {
-            return res.status(200).json(success(false, res.statusCode, validation, null));
+        const { error, _category_id, _network_id } = validateContactForm(req.body);
+        if (error) {
+            return res.status(200).json(success(false, res.statusCode, error, null));
         }
-        const { _category_id, _network_id } = validation;
 
         const _query1 = `INSERT INTO feedback_data(customer_id, first_name, last_name, email_id, company_name, category_id, network_id, mobile_no,
              subject, message, is_deleted, added_date, ticket_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (NEXTVAL('feedback_ticket_id_sequence') * 100 + currval('feedback_ticket_id_sequence'))) RETURNING "feedback_id" , "ticket_id"`;
@@ -293,11 +295,35 @@ const send_activation_link = async (customer_id) => {
     return emailSent ? 1 : 0; // 1 = sent, 0 = sending fail
 }
 
+// Helper to process signup email template
+const processSignUpEmailTemplate = (template, customerData) => {
+    const extraReplacements = {
+        [process.env.EMAIL_TAG_CATEGORY_NAME]: customerData.industry?.industry_name,
+        [process.env.EMAIL_TAG_COMPANY_NAME]: customerData.company_name || ''
+    };
+    return processCustomerEmailTemplate(template, customerData, extraReplacements);
+};
+
+// Helper to send the signup email
+const sendSignUpMailToList = async (emailList, subject, body_text) => {
+    try {
+        await emailTransporter.sendMail({
+            from: process.env.EMAIL_CONFIG_SENDER,
+            to: emailList,
+            subject: subject,
+            html: body_text,
+        });
+        return 1; // Send success
+    } catch (err) {
+        _logger.error(err.stack);
+        return 0; // Sending fail
+    }
+};
+
 const sendSignUpMail = async (customerId) => {
     try {
         const { CstCustomer, Industry, BusinessEmail, EmailTemplate } = getModels();
 
-        // Get customer with industry using ORM
         const customerData = await CstCustomer.findOne({
             attributes: ['company_name', 'first_name', 'last_name', 'email_id', 'mobile_no', 'register_date'],
             where: { customer_id: customerId },
@@ -310,74 +336,30 @@ const sendSignUpMail = async (customerId) => {
             }]
         });
 
-        if (customerData) {
-            // Get business emails using ORM
-            const businessEmails = await BusinessEmail.findAll({
-                attributes: ['email_id'],
-                where: {
-                    is_enabled: true,
-                    type_id: { [Op.in]: [2, 3] }
-                }
-            });
-            const emailList = businessEmails.map(row => row.email_id).join(', ');
+        if (!customerData) return 0; // Customer data not found
 
-            if (emailList.length > 0) {
-                // Get email template using ORM
-                const emailTemplate = await EmailTemplate.findOne({
-                    attributes: ['subject', 'body_text', 'is_enabled'],
-                    where: { template_id: EmailTemplates.BUSINESS_MAIL_AFTER_SIGNUP.value }
-                });
+        const businessEmails = await BusinessEmail.findAll({
+            attributes: ['email_id'],
+            where: { is_enabled: true, type_id: { [Op.in]: [2, 3] } }
+        });
+        const emailList = businessEmails.map(row => row.email_id).join(', ');
 
-                if (emailTemplate) {
-                    if (emailTemplate.is_enabled) {
-                        let subject = emailTemplate.subject && emailTemplate.subject.length > 0 ? emailTemplate.subject : "";
-                        let body_text = emailTemplate.body_text && emailTemplate.body_text.length > 0 ? emailTemplate.body_text : "";
+        if (!emailList.length) return -2; // Unable to find business email
 
-                        subject = subject.replaceAll(process.env.EMAIL_TAG_FIRST_NAME, customerData.first_name);
-                        subject = subject.replaceAll(process.env.EMAIL_TAG_LAST_NAME, customerData.last_name);
-                        subject = subject.replaceAll(process.env.EMAIL_TAG_EMAIL_ID, customerData.email_id);
-                        subject = subject.replaceAll(process.env.EMAIL_TAG_MOBILE_NO, customerData.mobile_no);
-                        subject = subject.replaceAll(process.env.SITE_URL_TAG, process.env.FRONT_SITE_URL);
-                        body_text = body_text.replaceAll(process.env.SITE_URL_TAG, process.env.FRONT_SITE_URL);
-                        body_text = body_text.replaceAll(process.env.EMAIL_TAG_FIRST_NAME, customerData.first_name);
-                        body_text = body_text.replaceAll(process.env.EMAIL_TAG_LAST_NAME, customerData.last_name);
-                        body_text = body_text.replaceAll(process.env.EMAIL_TAG_EMAIL_ID, customerData.email_id);
-                        body_text = body_text.replaceAll(process.env.EMAIL_TAG_MOBILE_NO, customerData.mobile_no);
-                        body_text = body_text.replaceAll(process.env.EMAIL_TAG_CATEGORY_NAME, customerData.industry.industry_name);
-                        body_text = body_text.replaceAll(process.env.EMAIL_TAG_COMPANY_NAME, customerData.company_name || '');
+        const emailTemplate = await EmailTemplate.findOne({
+            attributes: ['subject', 'body_text', 'is_enabled'],
+            where: { template_id: EmailTemplates.BUSINESS_MAIL_AFTER_SIGNUP.value }
+        });
 
-                        let mailOptions = {
-                            from: process.env.EMAIL_CONFIG_SENDER, // sender address
-                            to: emailList, // list of receivers
-                            subject: subject, // Subject line 
-                            html: body_text, // html body
-                        }
-                        let is_success = false;
-                        try {
-                            await emailTransporter.sendMail(mailOptions);
-                            is_success = true;
-                        } catch (err) {
-                            _logger.error(err.stack);
-                        }
-                        if (is_success) {
-                            return 1; /* Send*/
-                        } else {
-                            return 0; /* Sending fail*/
-                        }
-                    } else {
-                        return -4;      /*Templete is disabled*/
-                    }
-                } else {
-                    return -3;      /*Templete not found*/
-                }
-            } else {
-                return -2;     /*Unable to find business email*/
-            }
-        }
-        return 0;
+        if (!emailTemplate) return -3; // Template not found
+        if (!emailTemplate.is_enabled) return -4; // Template is disabled
+
+        const { subject, body_text } = processSignUpEmailTemplate(emailTemplate, customerData);
+        return await sendSignUpMailToList(emailList, subject, body_text);
     } catch (error) {
         console.error(`Error sending signup email: ${error.message}`);
-    }       /*Customer data not found*/
+        return 0;
+    }
 }
 
 const refresh_token = async (req, res, next) => {
@@ -725,7 +707,7 @@ const validatePasswordChange = (old_password, new_password) => {
     if (!new_password?.length) return "Please enter new password.";
     if (new_password.length < 8) return "The new password must contain atleast 8 characters.";
     if (!/\d/.test(new_password)) return "The new password must contain a number.";
-    if (!/[`!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?~]/.test(new_password)) return "The new password must contain a special character.";
+    if (!/[`!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?~]/.test(new_password)) return "The new password must contain a special character.";
     return null;
 };
 
@@ -936,7 +918,7 @@ const live_mode_toggle = async (req, res, next) => {
             return res.status(200).json(success(false, res.statusCode, "Account details not found, Please try again.", null));
         }
 
-        let new_status = customerData.live_environment === true ? false : true;
+        let new_status = !customerData.live_environment;
 
         // Update live environment using ORM
         const [i] = await CstCustomer.update(
@@ -1003,27 +985,82 @@ const live_mode_get = async (req, res, next) => {
     }
 };
 
+// Helper to validate app name format
+const validateAppName = (app_name) => {
+    if (!app_name?.length) return { error: "Please enter app name." };
+    const regularChars = /^([A-Za-z0-9][A-Za-z0-9_#\-.$% ]*)$/;
+    if (!regularChars.test(app_name)) return { error: "App name format is invalid." };
+    const trimmed = app_name.trim();
+    if (!trimmed?.length) return { error: "Please enter app name." };
+    return { _app_name: trimmed };
+};
+
+// Helper to parse product IDs from comma/pipe separated string
+const parseProductIds = (product_ids) => {
+    if (!product_ids?.length) return [];
+    const idList = product_ids.split(',').join('|').split('|');
+    return idList
+        .map(id => parseNumericId(id))
+        .filter(id => id > 0);
+};
+
+// Helper to upload certificate and extract public key
+const processCertificate = async (files) => {
+    let certificateUrl = "";
+    let publicKeySingleLine = "";
+
+    if (!files?.['certificate']) {
+        return { error: "Please upload certificate." };
+    }
+
+    try {
+        const fi = files['certificate'][0];
+        const cert = await cloudStorage.UploadFile(fi.path, 'certificate/' + fi.filename, true);
+        certificateUrl = `https://storage.cloud.google.com/${cert.bucket}/${cert.name}`;
+    } catch (err) {
+        _logger.error(err.stack);
+        return { error: "Please upload certificate." };
+    }
+
+    try {
+        const certificatePath = files['certificate'][0].path;
+        const certificateData = readFileSync(certificatePath);
+        const cert = new X509Certificate(certificateData);
+        const publicKey = cert.publicKey.export({ format: 'pem', type: 'spki' });
+        publicKeySingleLine = publicKey.replace(/\n/g, '').replace('-----BEGIN PUBLIC KEY-----', '').replace('-----END PUBLIC KEY-----', '');
+    } catch (err) {
+        _logger.error(err.stack);
+        return { error: "unable to extract public key from given certificate." };
+    }
+
+    return { certificateUrl, publicKeySingleLine };
+};
+
+// Helper to validate and parse IP addresses
+const parseIpAddresses = (ip_addresses) => {
+    if (!ip_addresses?.length) return { error: "Please enter ip addresses." };
+    const ipList = ip_addresses.split(',').join('|').split('|');
+    const validIps = [];
+    for (const ip of ipList) {
+        if (ip?.length) {
+            if (!db.isValidIP(ip)) return { error: "Please enter valid ip addresses." };
+            validIps.push(ip);
+        }
+    }
+    return { validIps };
+};
+
 const app_new = async (req, res, next) => {
     const { app_name, product_ids, description, expected_volume, callback_url, ip_addresses } = req.body;
     try {
-
-        if (!app_name || app_name.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter app name.", null));
+        const appNameResult = validateAppName(app_name);
+        if (appNameResult.error) {
+            return res.status(200).json(success(false, res.statusCode, appNameResult.error, null));
         }
-
-        const regularChars = /^([A-Za-z0-9][A-Za-z0-9_#\-.$% ]*)$/;
-        if (!regularChars.test(app_name)) {
-            return res.status(200).json(success(false, res.statusCode, "App name format is invalid.", null));
-        }
-
-        let _app_name = app_name.trim();
-        if (!_app_name || _app_name.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter app name.", null));
-        }
+        const _app_name = appNameResult._app_name;
 
         const { CstAppMast } = getModels();
 
-        // Check if app name exists using ORM
         const existingApp = await CstAppMast.findOne({
             attributes: ['app_id', 'app_name'],
             where: { customer_id: req.token_data.customer_id, is_deleted: false, app_name: 'uat_' + _app_name }
@@ -1032,7 +1069,6 @@ const app_new = async (req, res, next) => {
             return res.status(200).json(success(false, res.statusCode, "App name already exist.", null));
         }
 
-        // Check if app exists in production using ORM
         const existingLiveApp = await CstAppMast.findOne({
             attributes: ['app_id', 'app_name'],
             where: { customer_id: req.token_data.customer_id, is_deleted: false, app_name: _app_name, is_live_app_created: true }
@@ -1041,78 +1077,32 @@ const app_new = async (req, res, next) => {
             return res.status(200).json(success(false, res.statusCode, "App name already exist in production.", null));
         }
 
-        if (!product_ids || product_ids.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please select api product.", null));
-        }
-        const _join_product_ids = product_ids.split(',').join('|');
-        const _product_ids = _join_product_ids.split('|');
-        let prodIds = [];
-        for (let i = 0; i < _product_ids.length; i++) {
-            let prod_id = _product_ids[i] && validator.isNumeric(_product_ids[i].toString()) ? parseInt(_product_ids[i]) : 0;
-            if (prod_id > 0) {
-                prodIds.push(prod_id);
-            }
-        }
+        const prodIds = parseProductIds(product_ids);
         if (prodIds.length <= 0) {
             return res.status(200).json(success(false, res.statusCode, "Please select api product.", null));
         }
-        let certificate = "";
-        // if (req.files['certificate']) {
-        //     certificate = req.files['certificate'][0].filename;
-        // }
 
-        try {
-            if (req.files['certificate']) {
-                const fi = req.files['certificate'][0];
-                const cert = await cloudStorage.UploadFile(fi.path, 'certificate/' + fi.filename, true);
-                certificate = `https://storage.cloud.google.com/${cert.bucket}/${cert.name}`;
-            }
-        } catch (err) {
-            _logger.error(err.stack);
+        const certResult = await processCertificate(req.files);
+        if (certResult.error) {
+            return res.status(200).json(success(false, res.statusCode, certResult.error, null));
         }
-
-
-        if (!certificate || certificate.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please upload certificate.", null));
-        }
-        let publicKeySingleLine = '';
-        try {
-            const certificatePath = req.files['certificate'][0].path;
-            const certificateData = readFileSync(certificatePath);
-            const certificate = new X509Certificate(certificateData);
-            const publicKey = certificate.publicKey;
-            let public_key = publicKey.export({ format: 'pem', type: 'spki' });
-            publicKeySingleLine = public_key.replace(/\n/g, '').replace('-----BEGIN PUBLIC KEY-----', '').replace('-----END PUBLIC KEY-----', '');
-        } catch (err) {
-            _logger.error(err.stack);
-            return res.status(200).json(success(false, res.statusCode, "unable to extract public key from given certificate.", null));
-        }
+        const { certificateUrl: certificate, publicKeySingleLine } = certResult;
 
         if (!expected_volume || !validator.isNumeric(expected_volume.toString()) || expected_volume <= 0) {
             return res.status(200).json(success(false, res.statusCode, "Please enter expected traffic.", null));
         }
-        let _description = description; if (!description || description.length <= 0) { _description = ''; }
-        if (!ip_addresses || ip_addresses.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter ip addresses.", null));
+
+        const ipResult = parseIpAddresses(ip_addresses);
+        if (ipResult.error) {
+            return res.status(200).json(success(false, res.statusCode, ipResult.error, null));
         }
-        const joinip_addresses_list = ip_addresses.split(',').join('|');
-        const ip_addresses_list = joinip_addresses_list.split('|');
-        let ipAddress = [];
-        for (let i = 0; i < ip_addresses_list.length; i++) {
-            const element = ip_addresses_list[i];
-            if (element && element.length > 0) {
-                if (!db.isValidIP(element)) {
-                    return res.status(200).json(success(false, res.statusCode, "Please enter valid ip addresses.", null));
-                } else {
-                    ipAddress.push(element);
-                }
-            }
+        const ipAddress = ipResult.validIps;
+
+        if (callback_url?.length && !db.isValidURL(callback_url)) {
+            return res.status(200).json(success(false, res.statusCode, "Please enter valid callback url.", null));
         }
-        if (callback_url && callback_url.length > 0) {
-            if (!db.isValidURL(callback_url)) {
-                return res.status(200).json(success(false, res.statusCode, "Please enter valid callback url.", null));
-            }
-        }
+
+        const _description = description?.length ? description : '';
         const { CstCustomer, CstAppProduct } = getModels();
 
         // Get live environment using ORM
@@ -1198,113 +1188,97 @@ const app_products = async (req, res, next) => {
     }
 };
 
+// Helper to format date or return empty string
+const formatAppDate = (date) => date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(date)) : "";
+
+// Helper to get proxies for a product
+const getProxiesForProduct = async (productId) => {
+    const query = `SELECT proxy_id, proxy_name, display_name, product_id FROM proxies WHERE product_id = ? AND is_deleted = false AND is_published=true ORDER BY proxy_id DESC`;
+    const rows = await db.sequelize.query(query, { replacements: [productId], type: QueryTypes.SELECT });
+    return (rows || []).map(prx => ({
+        product_id: prx.product_id,
+        proxy_id: prx.proxy_id,
+        proxy_name: prx.display_name?.length ? prx.display_name : prx.proxy_name,
+        display_name: prx.display_name,
+    }));
+};
+
+// Helper to get products and proxies for an app
+const getAppProductsAndProxies = async (appId) => {
+    const query = `SELECT p.product_id, p.product_name, p.description, p.key_features FROM product p INNER JOIN cst_app_product m ON p.product_id = m.product_id WHERE m.app_id = ?`;
+    const rows = await db.sequelize.query(query, { replacements: [appId], type: QueryTypes.SELECT });
+    const products = [];
+    const proxies = [];
+    for (const item of rows || []) {
+        products.push({ product_id: item.product_id, product_name: item.product_name, description: item.description, key_features: item.key_features });
+        const itemProxies = await getProxiesForProduct(item.product_id);
+        proxies.push(...itemProxies);
+    }
+    return { products, proxies };
+};
+
+// Helper to format app data
+const formatAppData = (app, products, proxies) => ({
+    app_id: app.app_id,
+    app_name: app.app_name,
+    display_name: app.display_name,
+    description: app.description,
+    expected_volume: app.expected_volume,
+    callback_url: app.callback_url,
+    ip_addresses: app.ip_addresses,
+    added_date: formatAppDate(app.added_date),
+    is_approved: app.is_approved,
+    approved_by: app.approved_by,
+    approve_date: formatAppDate(app.approve_date),
+    approve_remark: app.approve_remark,
+    is_rejected: app.is_rejected,
+    rejected_by: app.rejected_by,
+    rejected_date: formatAppDate(app.rejected_date),
+    reject_remark: app.reject_remark,
+    api_key: app.is_approved ? app.api_key : "",
+    api_secret: app.is_approved ? app.api_secret : "",
+    key_issued_date: formatAppDate(app.key_issued_date),
+    key_expiry_date: formatAppDate(app.key_expiry_date),
+    in_live_env: app.in_live_env,
+    is_live_app_created: app.is_live_app_created,
+    live_app_id: app.live_app_id,
+    mkr_rejected: app.mkr_rejected,
+    mkr_date: formatAppDate(app.mkr_date),
+    mkr_remark: app.mkr_remark,
+    products: products,
+    proxies: proxies,
+});
+
 const my_app_list_get = async (req, res, next) => {
     try {
         const { CstCustomer } = getModels();
-
-        // Get live environment using ORM
         const customerEnv = await CstCustomer.findOne({
             attributes: ['live_environment'],
             where: { customer_id: req.token_data.customer_id }
         });
-        let live_environment = false; if (customerEnv) { live_environment = customerEnv.live_environment; }
-
-        // Complex query with subqueries - keeping as raw SQL
+        const live_environment = customerEnv?.live_environment || false;
 
         const _query3 = `SELECT a.app_id, a.app_name, a.description, a.expected_volume, a.callback_url, a.ip_addresses, a.certificate_file, a.added_date,
         a.is_approved, a.approved_by, a.approve_date, a.approve_remark, a.is_rejected, a.rejected_by, a.rejected_date, a.reject_remark,
         a.api_key, a.api_secret, a.key_issued_date, a.key_expiry_date, a.in_live_env, a.is_live_app_created, a.live_app_id, a.display_name,
-        a.mkr_is_rejected AS mkr_rejected,
-        a.mkr_rejected_date AS mkr_date, 
-        a.mkr_rejected_rmk AS mkr_remark,
+        a.mkr_is_rejected AS mkr_rejected, a.mkr_rejected_date AS mkr_date, a.mkr_rejected_rmk AS mkr_remark,
         COALESCE((SELECT TRIM(COALESCE(i.first_name, '') || ' ' || COALESCE(i.last_name, '')) FROM adm_user i WHERE i.account_id = a.mkr_rejected_by), '') AS mkr_name,
-                     
-        a.is_rejected AS chkr_rejected,
-        a.rejected_date AS chkr_date, 
-        a.reject_remark AS chkr_remark,
-        
-        COALESCE((SELECT TRIM(COALESCE(i.first_name, '') || ' ' || COALESCE(i.last_name, '')) FROM adm_user i WHERE i.account_id = a.rejected_by), '') AS chkr_name	
-            
+        a.is_rejected AS chkr_rejected, a.rejected_date AS chkr_date, a.reject_remark AS chkr_remark,
+        COALESCE((SELECT TRIM(COALESCE(i.first_name, '') || ' ' || COALESCE(i.last_name, '')) FROM adm_user i WHERE i.account_id = a.rejected_by), '') AS chkr_name
         FROM cst_app_mast a WHERE a.customer_id = ? AND a.is_deleted = false`;
-        const row4 = await db.sequelize.query(_query3, { replacements: [req.token_data.customer_id], type: QueryTypes.SELECT });
-        let my_apps = [];
-        if (row4) {
-            for (const app of row4) {
-                const _app_id = app.app_id;
-                const _is_approved = app.is_approved;
 
-                let api_key = ""; let api_secret = "";
-                if (_is_approved == true) {
-                    api_key = app.api_key; api_secret = app.api_secret;
-                }
-                const _query2 = `SELECT p.product_id, p.product_name,p.description, p.key_features FROM product p 
-            INNER JOIN cst_app_product m ON p.product_id = m.product_id WHERE m.app_id = ? `;
-                const row2 = await db.sequelize.query(_query2, { replacements: [_app_id], type: QueryTypes.SELECT });
-                let products = [];
-                let proxies = [];
-                if (row2) {
-                    for (const item of row2) {
-                        products.push({
-                            product_id: item.product_id,
-                            product_name: item.product_name,
-                            description: item.description,
-                            key_features: item.key_features,
-                        });
-
-                        const _query1 = `SELECT proxy_id, proxy_name, display_name, product_id FROM proxies  WHERE product_id = ? AND is_deleted = false AND is_published=true  ORDER BY proxy_id DESC`;
-                        const row1 = await db.sequelize.query(_query1, { replacements: [item.product_id], type: QueryTypes.SELECT });
-                        if (row1) {
-                            for (const prx of row1) {
-                                proxies.push({
-                                    product_id: prx.product_id,
-                                    proxy_id: prx.proxy_id,
-                                    proxy_name: prx.display_name && prx.display_name.length > 0 ? prx.display_name : prx.proxy_name,
-                                    display_name: prx.display_name,
-                                });
-                            }
-                        }
-                    }
-                }
-                my_apps.push({
-                    app_id: app.app_id,
-                    app_name: app.app_name,
-                    display_name: app.display_name,
-                    description: app.description,
-                    expected_volume: app.expected_volume,
-                    callback_url: app.callback_url,
-                    ip_addresses: app.ip_addresses,
-                    added_date: app.added_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(app.added_date)) : "",
-                    is_approved: app.is_approved,
-                    approved_by: app.approved_by,
-                    approve_date: app.approve_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(app.approve_date)) : "",
-                    approve_remark: app.approve_remark,
-                    is_rejected: app.is_rejected,
-                    rejected_by: app.rejected_by,
-                    rejected_date: app.rejected_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(app.rejected_date)) : "",
-                    reject_remark: app.reject_remark,
-                    api_key: api_key,
-                    api_secret: api_secret,
-                    key_issued_date: app.key_issued_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(app.key_issued_date)) : "",
-                    key_expiry_date: app.key_expiry_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(app.key_expiry_date)) : "",
-                    in_live_env: app.in_live_env,
-                    is_live_app_created: app.is_live_app_created,
-                    live_app_id: app.live_app_id,
-
-                    mkr_rejected: app.mkr_rejected,
-                    mkr_date: app.mkr_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(app.mkr_date)) : "",
-                    mkr_remark: app.mkr_remark,
-                    // mkr_name: app.mkr_name,
-                    products: products,
-                    proxies: proxies,
-                });
-            }
+        const appRows = await db.sequelize.query(_query3, { replacements: [req.token_data.customer_id], type: QueryTypes.SELECT });
+        const my_apps = [];
+        for (const app of appRows || []) {
+            const { products, proxies } = await getAppProductsAndProxies(app.app_id);
+            my_apps.push(formatAppData(app, products, proxies));
         }
+
         const results = {
-            live_app: my_apps.filter(function (el) { return el.in_live_env == true; }),
-            sandbox_app: my_apps.filter(function (el) { return el.in_live_env == false; }),
+            live_app: my_apps.filter(el => el.in_live_env),
+            sandbox_app: my_apps.filter(el => !el.in_live_env),
             live_environment: live_environment,
         };
-
 
         return res.status(200).json(success(true, res.statusCode, "My Apps Data.", results));
     } catch (err) {
@@ -1313,24 +1287,55 @@ const my_app_list_get = async (req, res, next) => {
     }
 };
 
+// Helper to check if app can be edited
+const checkAppEditability = (appStatus) => {
+    if (!appStatus) return "App details not found, Please try again.";
+    if (appStatus.is_approved) return "Approved app cannot be edited.";
+    if (appStatus.is_rejected) return "Rejected app cannot be edited.";
+    return null;
+};
+
+// Helper to extract public key from certificate file
+const extractPublicKeyFromCert = (certPath) => {
+    const certificateData = readFileSync(certPath);
+    const cert = new X509Certificate(certificateData);
+    const publicKey = cert.publicKey.export({ format: 'pem', type: 'spki' });
+    return publicKey.replace(/\n/g, '').replace('-----BEGIN PUBLIC KEY-----', '').replace('-----END PUBLIC KEY-----', '');
+};
+
+// Helper to upload certificate for update (optional)
+const processUpdateCertificate = async (files, existingCert, existingPubKey) => {
+    if (!files?.['certificate']) {
+        return { certificateUrl: existingCert, publicKeySingleLine: existingPubKey };
+    }
+    try {
+        const fi = files['certificate'][0];
+        const cert = await cloudStorage.UploadFile(fi.path, 'certificate/' + fi.filename, true);
+        const certificateUrl = `https://storage.cloud.google.com/${cert.bucket}/${cert.name}`;
+        const publicKeySingleLine = extractPublicKeyFromCert(fi.path);
+        return { certificateUrl, publicKeySingleLine };
+    } catch (err) {
+        _logger.error(err.stack);
+        return { error: "unable to extract public key from given certificate." };
+    }
+};
+
 const app_update = async (req, res, next) => {
     const { app_id, app_name, product_ids, description, expected_volume, callback_url, ip_addresses } = req.body;
     try {
-        let _app_id = app_id && validator.isNumeric(app_id.toString()) ? parseInt(app_id) : 0;
+        const _app_id = parseNumericId(app_id);
         if (_app_id <= 0) {
             return res.status(200).json(success(false, res.statusCode, "Incorrect app id.", null));
         }
-        if (!app_name || app_name.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter app name.", null));
+
+        const appNameResult = validateAppName(app_name);
+        if (appNameResult.error) {
+            return res.status(200).json(success(false, res.statusCode, appNameResult.error, null));
         }
-        let _app_name = app_name.trim();
-        if (!_app_name || _app_name.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter app name.", null));
-        }
+        const _app_name = appNameResult._app_name;
 
         const { CstAppMast } = getModels();
 
-        // Check if app name exists using ORM
         const existingApp = await CstAppMast.findOne({
             attributes: ['app_id', 'app_name', 'display_name'],
             where: { customer_id: req.token_data.customer_id, is_deleted: false, app_name: 'uat_' + _app_name, app_id: { [Op.ne]: _app_id } }
@@ -1339,7 +1344,6 @@ const app_update = async (req, res, next) => {
             return res.status(200).json(success(false, res.statusCode, "App name already exist.", null));
         }
 
-        // Check if app exists in production using ORM
         const existingLiveApp = await CstAppMast.findOne({
             attributes: ['app_id', 'app_name'],
             where: { customer_id: req.token_data.customer_id, is_deleted: false, app_name: _app_name, app_id: { [Op.ne]: _app_id }, is_live_app_created: true }
@@ -1348,313 +1352,233 @@ const app_update = async (req, res, next) => {
             return res.status(200).json(success(false, res.statusCode, "App name already exist in production.", null));
         }
 
-        // Check app status using ORM
         const appStatus = await CstAppMast.findOne({
             attributes: ['app_id', 'is_approved', 'is_rejected'],
             where: { app_id: _app_id, is_deleted: false }
         });
-        if (!appStatus) {
-            return res.status(500).json(success(false, res.statusCode, "App details not found, Please try again.", null));
+        const editError = checkAppEditability(appStatus);
+        if (editError) {
+            return res.status(500).json(success(false, res.statusCode, editError, null));
         }
-        if (appStatus.is_approved && appStatus.is_approved == true) {
-            return res.status(500).json(success(false, res.statusCode, "Approved app cannot be edited.", null));
-        }
-        if (appStatus.is_rejected && appStatus.is_rejected == true) {
-            return res.status(500).json(success(false, res.statusCode, "Rejected app cannot be edited.", null));
-        }
-        if (!product_ids || product_ids.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please select api product.", null));
-        }
-        const _join_product_ids = product_ids.split(',').join('|');
-        const _product_ids = _join_product_ids.split('|');
-        let prodIds = [];
-        for (const element of _product_ids) {
-            let prod_id = element && validator.isNumeric(element.toString()) ? parseInt(element) : 0;
-            if (prod_id > 0) {
-                prodIds.push(prod_id);
-            }
-        }
+
+        const prodIds = parseProductIds(product_ids);
         if (prodIds.length <= 0) {
             return res.status(200).json(success(false, res.statusCode, "Please select api product.", null));
-        }
-        let certificate = "";
-        // if (req.files['certificate']) {
-        //     certificate = req.files['certificate'][0].filename;
-        // }
-
-        if (req.files['certificate']) {
-            const fi = req.files['certificate'][0];
-            const cert = await cloudStorage.UploadFile(fi.path, 'certificate/' + fi.filename, true);
-            certificate = `https://storage.cloud.google.com/${cert.bucket}/${cert.name}`;
         }
 
         if (!expected_volume || !validator.isNumeric(expected_volume.toString()) || expected_volume <= 0) {
             return res.status(200).json(success(false, res.statusCode, "Please enter expected traffic.", null));
         }
 
-        if (callback_url && callback_url.length > 0) {
-            if (!db.isValidURL(callback_url)) {
-                return res.status(200).json(success(false, res.statusCode, "Please enter valid callback url.", null));
-            }
+        if (callback_url?.length && !db.isValidURL(callback_url)) {
+            return res.status(200).json(success(false, res.statusCode, "Please enter valid callback url.", null));
         }
-        let _description = description; if (!description || description.length <= 0) { _description = ''; }
-        if (!ip_addresses || ip_addresses.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter ip addresses.", null));
+
+        const ipResult = parseIpAddresses(ip_addresses);
+        if (ipResult.error) {
+            return res.status(200).json(success(false, res.statusCode, ipResult.error, null));
         }
-        const joinip_addresses_list = ip_addresses.split(',').join('|');
-        const ip_addresses_list = joinip_addresses_list.split('|');
-        let ipAddress = [];
-        for (let i = 0; i < ip_addresses_list.length; i++) {
-            const element = ip_addresses_list[i];
-            if (element && element.length > 0) {
-                if (!db.isValidIP(element)) {
-                    return res.status(200).json(success(false, res.statusCode, "Please enter valid IP.", null));
-                } else {
-                    ipAddress.push(element);
-                }
-            }
-        }
-        // Get app details using ORM
+        const ipAddress = ipResult.validIps;
+
         const appDetails = await CstAppMast.findOne({
             attributes: ['app_id', 'app_name', 'description', 'expected_volume', 'callback_url', 'ip_addresses', 'certificate_file', 'cert_public_key', 'in_live_env'],
             where: { app_id: _app_id, customer_id: req.token_data.customer_id, is_deleted: false }
         });
-        if (appDetails) {
-            let cert_public_key = '';
-            if (certificate && certificate.length > 0) {
-                try {
-                    const certificatePath = req.files['certificate'][0].path;
-                    const certificateData = readFileSync(certificatePath);
-                    const certificate = new X509Certificate(certificateData);
-                    const publicKey = certificate.publicKey;
-                    let public_key = publicKey.export({ format: 'pem', type: 'spki' });
-                    cert_public_key = public_key.replace(/\n/g, '').replace('-----BEGIN PUBLIC KEY-----', '').replace('-----END PUBLIC KEY-----', '');
-                } catch (err) {
-                    _logger.error(err.stack);
-                    return res.status(200).json(success(false, res.statusCode, "unable to extract public key from given certificate.", null));
-                }
-            }
-            if (!certificate || certificate.length <= 0) {
-                certificate = appDetails.certificate_file;
-                cert_public_key = appDetails.cert_public_key;
-            }
 
-            // Update app using ORM
-            const [j] = await CstAppMast.update({
-                cert_public_key: cert_public_key,
-                app_name: 'uat_' + _app_name,
-                description: _description,
-                expected_volume: expected_volume,
-                callback_url: callback_url,
-                ip_addresses: ipAddress.join(','),
-                certificate_file: certificate,
-                modify_by: req.token_data.customer_id,
-                modify_date: db.get_ist_current_date(),
-                display_name: _app_name
-            }, { where: { app_id: _app_id } });
-            const _query1 = `update cst_app_mast`;
-            const _replacements2 = [cert_public_key, 'uat_' + _app_name, _description, expected_volume, callback_url, ipAddress.join(','), certificate, req.token_data.customer_id, db.get_ist_current_date(), _app_name, _app_id];
-
-            if (j > 0) {
-                const { CstAppProduct } = getModels();
-
-                // Delete existing app products using ORM
-                await CstAppProduct.destroy({ where: { app_id: _app_id } });
-
-                // Create new app products using ORM
-                for (const element of prodIds) {
-                    let prod_id = element;
-                    await CstAppProduct.create({ app_id: _app_id, product_id: prod_id });
-                }
-
-                try {
-                    let data_to_log = {
-                        correlation_id: correlator.getId(),
-                        token_id: req.token_data.token_id,
-                        account_id: req.token_data.account_id,
-                        user_type: 2,
-                        user_id: req.token_data.customer_id,
-                        narration: 'App details updated(' + (appDetails.in_live_env && appDetails.in_live_env == true ? 'Live' : 'Sandbox') + '). App name = ' + (appDetails.app_name == _app_name ? _app_name : appDetails.app_name + ' to ' + _app_name),
-                        query: db.buildQuery_Array(_query1, _replacements2),
-                        date_time: db.get_ist_current_date(),
-                    }
-                    action_logger.info(JSON.stringify(data_to_log));
-                } catch (_) { }
-
-                return res.status(200).json(success(true, res.statusCode, "App update successfully.", null));
-            } else {
-                return res.status(200).json(success(false, res.statusCode, "Unable to save your app, Please try again.", null));
-            }
-        } else {
+        if (!appDetails) {
             return res.status(200).json(success(false, res.statusCode, "Unable to find your app, Please try again.", null));
         }
+
+        const certResult = await processUpdateCertificate(req.files, appDetails.certificate_file, appDetails.cert_public_key);
+        if (certResult.error) {
+            return res.status(200).json(success(false, res.statusCode, certResult.error, null));
+        }
+        const { certificateUrl: certificate, publicKeySingleLine: cert_public_key } = certResult;
+
+        const _description = description?.length ? description : '';
+        const [j] = await CstAppMast.update({
+            cert_public_key: cert_public_key,
+            app_name: 'uat_' + _app_name,
+            description: _description,
+            expected_volume: expected_volume,
+            callback_url: callback_url,
+            ip_addresses: ipAddress.join(','),
+            certificate_file: certificate,
+            modify_by: req.token_data.customer_id,
+            modify_date: db.get_ist_current_date(),
+            display_name: _app_name
+        }, { where: { app_id: _app_id } });
+
+        if (j <= 0) {
+            return res.status(200).json(success(false, res.statusCode, "Unable to save your app, Please try again.", null));
+        }
+
+        const { CstAppProduct } = getModels();
+        await CstAppProduct.destroy({ where: { app_id: _app_id } });
+        for (const prod_id of prodIds) {
+            await CstAppProduct.create({ app_id: _app_id, product_id: prod_id });
+        }
+
+        try {
+            const _query1 = `update cst_app_mast`;
+            const _replacements2 = [cert_public_key, 'uat_' + _app_name, _description, expected_volume, callback_url, ipAddress.join(','), certificate, req.token_data.customer_id, db.get_ist_current_date(), _app_name, _app_id];
+            action_logger.info(JSON.stringify({
+                correlation_id: correlator.getId(),
+                token_id: req.token_data.token_id,
+                account_id: req.token_data.account_id,
+                user_type: 2,
+                user_id: req.token_data.customer_id,
+                narration: 'App details updated(' + (appDetails.in_live_env ? 'Live' : 'Sandbox') + '). App name = ' + (appDetails.app_name == _app_name ? _app_name : appDetails.app_name + ' to ' + _app_name),
+                query: db.buildQuery_Array(_query1, _replacements2),
+                date_time: db.get_ist_current_date(),
+            }));
+        } catch (_) { }
+
+        return res.status(200).json(success(true, res.statusCode, "App update successfully.", null));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
     }
 };
 
+// Helper to delete app from Apigee if approved
+const deleteApigeeApp = async (appData) => {
+    if (!appData.is_approved) return;
+    try {
+        const email_id = appData.customer?.email_id;
+        const product_URL = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/developers/${email_id}/apps/${appData.app_name}`;
+        const apigeeAuth = await db.get_apigee_token();
+        await fetch(product_URL, { method: "DELETE", headers: { Authorization: `Bearer ${apigeeAuth}` } });
+    } catch (err) {
+        _logger.error(err.stack);
+    }
+};
+
 const cust_app_del = async (req, res, next) => {
     const { app_id } = req.body;
-    let _app_id = app_id && validator.isNumeric(app_id.toString()) ? parseInt(app_id) : 0;
+    const _app_id = parseNumericId(app_id);
     if (_app_id <= 0) {
         return res.status(200).json(success(false, res.statusCode, "Incorrect app id.", null));
     }
     try {
         const { CstAppMast, CstCustomer } = getModels();
 
-        // Get app with customer using ORM
         const appData = await CstAppMast.findOne({
             attributes: ['app_id', 'app_name', 'is_approved', 'customer_id', 'in_live_env'],
             where: { app_id: _app_id, is_deleted: false },
-            include: [{
-                model: CstCustomer,
-                as: 'customer',
-                attributes: ['email_id']
-            }]
+            include: [{ model: CstCustomer, as: 'customer', attributes: ['email_id'] }]
         });
+
         if (!appData) {
             return res.status(200).json(success(false, res.statusCode, "App details not found, Please try again.", null));
         }
-        if (appData.is_approved == true) {
-            const app_name = appData.app_name;
-            const email_id = appData.customer?.email_id;
-            const product_URL = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/developers/${email_id}/apps/${app_name}`;
-            const apigeeAuth = await db.get_apigee_token();
-            const response = await fetch(product_URL, { method: "DELETE", headers: { Authorization: `Bearer ${apigeeAuth}`, }, });
-            const responseData = await response.json();
-            if (responseData && responseData.appId) {
-            }
-        }
 
-        // Soft delete app using ORM
-        const [i] = await CstAppMast.update(
-            { is_deleted: true },
-            { where: { app_id: _app_id } }
-        );
-        const _replacements2 = [_app_id];
-        if (i > 0) {
+        await deleteApigeeApp(appData);
 
-            try {
-                let data_to_log = {
-                    correlation_id: correlator.getId(),
-                    token_id: req.token_data.token_id,
-                    account_id: req.token_data.account_id,
-                    user_type: 2,
-                    user_id: req.token_data.customer_id,
-                    narration: 'App deleted (' + (row[0].in_live_env && row[0].in_live_env == true ? 'Live' : 'Sandbox') + '). App name = ' + row[0].app_name,
-                    query: db.buildQuery_Array(_query1, _replacements2),
-                    date_time: db.get_ist_current_date(),
-                }
-                action_logger.info(JSON.stringify(data_to_log));
-            } catch (err) {
+        const [i] = await CstAppMast.update({ is_deleted: true }, { where: { app_id: _app_id } });
 
-                console.log(err.stack);
-            }
-
-            return res.status(200).json(success(true, res.statusCode, "App deleted successfully.", null));
-        } else {
+        if (i <= 0) {
             return res.status(200).json(success(false, res.statusCode, "Unable to delete app, please try again.", null));
         }
+
+        try {
+            const _query1 = `UPDATE cst_app_mast SET is_deleted = true WHERE app_id = ?`;
+            action_logger.info(JSON.stringify({
+                correlation_id: correlator.getId(),
+                token_id: req.token_data.token_id,
+                account_id: req.token_data.account_id,
+                user_type: 2,
+                user_id: req.token_data.customer_id,
+                narration: 'App deleted (' + (appData.in_live_env ? 'Live' : 'Sandbox') + '). App name = ' + appData.app_name,
+                query: db.buildQuery_Array(_query1, [_app_id]),
+                date_time: db.get_ist_current_date(),
+            }));
+        } catch (err) {
+            console.log(err.stack);
+        }
+
+        return res.status(200).json(success(true, res.statusCode, "App deleted successfully.", null));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
     }
 };
 
+// Helper to format app for edit view
+const formatAppForEdit = (item, products) => ({
+    app_id: item.app_id,
+    app_name: item.display_name?.length ? item.display_name : item.app_name.replace(/^uat_/, ''),
+    display_name: item.display_name,
+    description: item.description,
+    expected_volume: item.expected_volume,
+    callback_url: item.callback_url,
+    ip_addresses: item.ip_addresses,
+    added_date: formatAppDate(item.added_date),
+    is_approved: item.is_approved,
+    approved_by: item.approved_by,
+    approve_date: formatAppDate(item.approve_date),
+    approve_remark: item.approve_remark,
+    is_rejected: item.is_rejected,
+    rejected_by: item.rejected_by,
+    rejected_date: formatAppDate(item.rejected_date),
+    reject_remark: item.reject_remark,
+    api_key: item.is_approved ? item.api_key : "",
+    api_secret: item.is_approved ? item.api_secret : "",
+    key_issued_date: formatAppDate(item.key_issued_date),
+    key_expiry_date: formatAppDate(item.key_expiry_date),
+    in_live_env: item.in_live_env,
+    products: products,
+});
+
+// Helper to get products for an app (for edit view)
+const getAppProducts = async (appId) => {
+    const query = `SELECT p.product_id, p.product_name, p.description, p.key_features FROM product p INNER JOIN cst_app_product m ON p.product_id = m.product_id WHERE m.app_id = ?`;
+    const rows = await db.sequelize.query(query, { replacements: [appId], type: QueryTypes.SELECT });
+    return (rows || []).map(cap => ({
+        product_id: cap.product_id,
+        product_name: cap.product_name,
+        description: cap.description,
+        key_features: cap.key_features,
+    }));
+};
+
 const my_app_edit_get = async (req, res, next) => {
     const { app_id } = req.body;
-    let _appid = app_id && validator.isNumeric(app_id.toString()) ? parseInt(app_id) : 0;
+    const _appid = parseNumericId(app_id);
     try {
-
-        const _query3 = `SELECT a.app_id, a.is_approved , a.is_rejected, a.app_name, a.description, a.expected_volume, a.callback_url, a.ip_addresses, a.certificate_file, a.added_date,
-        a.is_approved, a.approved_by, a.approve_date, a.approve_remark, a.is_rejected, a.rejected_by, a.rejected_date, a.reject_remark,
+        const _query3 = `SELECT a.app_id, a.is_approved, a.is_rejected, a.app_name, a.description, a.expected_volume, a.callback_url, a.ip_addresses, a.certificate_file, a.added_date,
+        a.approved_by, a.approve_date, a.approve_remark, a.rejected_by, a.rejected_date, a.reject_remark,
         a.api_key, a.api_secret, a.key_issued_date, a.key_expiry_date, a.in_live_env, a.display_name
-        FROM cst_app_mast a WHERE a.app_id = ?  AND a.customer_id = ? AND a.is_deleted = false`;
+        FROM cst_app_mast a WHERE a.app_id = ? AND a.customer_id = ? AND a.is_deleted = false`;
         const row4 = await db.sequelize.query(_query3, { replacements: [_appid, req.token_data.customer_id], type: QueryTypes.SELECT });
-        let my_apps = [];
-        if (row4) {
-            for (const item of row4) {
-                if (item.is_approved && item.is_approved == true) {
-                    return res.status(500).json(success(false, res.statusCode, "Approved app cannot be edited.", null));
-                }
-                if (item.is_rejected && item.is_rejected == true) {
-                    return res.status(500).json(success(false, res.statusCode, "Rejected app cannot be edited.", null));
-                }
 
-                const _app_id = item.app_id;
-                const _is_approved = item.is_approved;
-
-                let api_key = ""; let api_secret = "";
-                if (_is_approved == true) {
-                    api_key = item.api_key; api_secret = item.api_secret;
-                }
-                const _query2 = `SELECT p.product_id, p.product_name,p.description, p.key_features FROM product p 
-                INNER JOIN cst_app_product m ON p.product_id = m.product_id WHERE m.app_id = ? `;
-                const row2 = await db.sequelize.query(_query2, { replacements: [_app_id], type: QueryTypes.SELECT });
-                let products = [];
-                if (row2) {
-                    for (const cap of row2) {
-                        products.push({
-                            product_id: cap.product_id,
-                            product_name: cap.product_name,
-                            description: cap.description,
-                            key_features: cap.key_features,
-                        });
-                    }
-                }
-                let app_name_new = item.app_name;
-                my_apps.push({
-                    app_id: item.app_id,
-                    app_name: item.display_name && item.display_name.length > 0 ? item.display_name : app_name_new.replace(/^uat_/, ''),
-                    display_name: item.display_name,
-                    description: item.description,
-                    expected_volume: item.expected_volume,
-                    callback_url: item.callback_url,
-                    ip_addresses: item.ip_addresses,
-                    added_date: item.added_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(row4[0].added_date)) : "",
-                    is_approved: item.is_approved,
-                    approved_by: item.approved_by,
-                    approve_date: item.approve_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(row4[0].approve_date)) : "",
-                    approve_remark: item.approve_remark,
-                    is_rejected: item.is_rejected,
-                    rejected_by: item.rejected_by,
-                    rejected_date: item.rejected_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(row4[0].rejected_date)) : "",
-                    reject_remark: item.reject_remark,
-                    api_key: api_key,
-                    api_secret: api_secret,
-                    key_issued_date: item.key_issued_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(row4[0].key_issued_date)) : "",
-                    key_expiry_date: item.key_expiry_date ? dateFormat(process.env.DATE_FORMAT, db.convert_db_date_to_ist(row4[0].key_expiry_date)) : "",
-                    in_live_env: item.in_live_env,
-                    products: products,
-                });
+        const item = row4?.[0];
+        if (item) {
+            const editError = checkAppEditability({ is_approved: item.is_approved, is_rejected: item.is_rejected });
+            if (editError) {
+                return res.status(500).json(success(false, res.statusCode, editError, null));
             }
         }
-        const { Product, PageLabelInfo } = getModels();
 
-        // Get products using ORM
-        const products = await Product.findAll({
+        const products = item ? await getAppProducts(item.app_id) : [];
+        const my_apps = item ? formatAppForEdit(item, products) : null;
+
+        const { Product, PageLabelInfo } = getModels();
+        const productsList = await Product.findAll({
             attributes: ['product_id', 'product_name'],
             where: { is_published: true }
         });
-        let list = [];
-        products?.forEach(item => {
-            list.push({
-                product_id: item.product_id,
-                product_name: item.product_name,
-            });
-        });
+        const list = (productsList || []).map(p => ({ product_id: p.product_id, product_name: p.product_name }));
 
-        // Get page labels using ORM
         const rowLabel = await PageLabelInfo.findAll({
             attributes: ['label_id', 'pages_name', 'label_name', 'info_text']
         });
-        const results = {
-            my_apps: my_apps[0],
+
+        return res.status(200).json(success(true, res.statusCode, "My Apps Data.", {
+            my_apps: my_apps,
             products_list: list,
             label_info_list: rowLabel
-        };
-        return res.status(200).json(success(true, res.statusCode, "My Apps Data.", results));
+        }));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
@@ -1738,154 +1662,109 @@ const get_started_get = async (req, res, next) => {
     }
 }
 
+// Helper to process production certificate
+const processProductionCertificate = async (files) => {
+    if (!files?.['certificate']?.[0]?.filename) {
+        return { error: "Please upload certificate." };
+    }
+    try {
+        const fi = files['certificate'][0];
+        const cert = await cloudStorage.UploadFile(fi.path, 'certificate/' + fi.filename, true);
+        const certificateUrl = `https://storage.cloud.google.com/${cert.bucket}/${cert.name}`;
+        const publicKeySingleLine = extractPublicKeyFromCert(fi.path);
+        return { certificateUrl, publicKeySingleLine };
+    } catch (err) {
+        _logger.error(err.stack);
+        return { error: "unable to extract public key from given certificate." };
+    }
+};
+
 const move_to_production = async (req, res, next) => {
     const { app_id, callback_url, ip_addresses } = req.body;
-    res.on('finish', () => {
-        db.delete_uploaded_files(req);
-    });
-    try {
-        const { CstAppMast } = getModels();
-        let _app_id = app_id && validator.isNumeric(app_id.toString()) ? parseInt(app_id) : 0;
+    res.on('finish', () => { db.delete_uploaded_files(req); });
 
-        // Get app details using ORM
+    try {
+        const { CstAppMast, CstAppProduct } = getModels();
+        const _app_id = parseNumericId(app_id);
+
         const appData = await CstAppMast.findOne({
             attributes: ['app_id', 'customer_id', 'app_name', 'description', 'expected_volume', 'callback_url', 'ip_addresses', 'cert_public_key', 'in_live_env', 'display_name'],
             where: { app_id: _app_id, is_deleted: false }
         });
+
         if (!appData) {
             return res.status(200).json(success(false, res.statusCode, "App details not found.", null));
         }
 
-        // Check if app already in production using ORM
         const existingLiveApp = await CstAppMast.findOne({
-            attributes: ['app_id', 'app_name', 'is_live_app_created'],
+            attributes: ['app_id'],
             where: { customer_id: req.token_data.customer_id, is_deleted: false, is_live_app_created: true, app_id: _app_id }
         });
+
         if (existingLiveApp) {
             return res.status(200).json(success(false, res.statusCode, "App already exist in production.", null));
         }
 
-
-        let certificates = "";
-        if (req.files['certificate']) {
-            certificates = req.files['certificate'][0].filename;
+        const certResult = await processProductionCertificate(req.files);
+        if (certResult.error) {
+            return res.status(200).json(success(false, res.statusCode, certResult.error, null));
         }
 
-        if (!certificates || certificates.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please upload certificate.", null));
+        const ipResult = parseIpAddresses(ip_addresses);
+        if (ipResult.error) {
+            return res.status(200).json(success(false, res.statusCode, ipResult.error, null));
         }
 
-        let certificate = "";
-
-        if (req.files['certificate']) {
-            const fi = req.files['certificate'][0];
-            const cert = await cloudStorage.UploadFile(fi.path, 'certificate/' + fi.filename, true);
-            certificate = `https://storage.cloud.google.com/${cert.bucket}/${cert.name}`;
+        const _callback_url = callback_url?.trim() || '';
+        if (_callback_url && !db.isValidURL(_callback_url)) {
+            return res.status(200).json(success(false, res.statusCode, "Please enter valid callback url.", null));
         }
 
-        let publicKeySingleLine = '';
-        try {
-            const certificatePath = req.files['certificate'][0].path;
-            const certificateData = readFileSync(certificatePath);
-            const certificate = new X509Certificate(certificateData);
-            const publicKey = certificate.publicKey;
-            let public_key = publicKey.export({ format: 'pem', type: 'spki' });
-            publicKeySingleLine = public_key.replace(/\n/g, '').replace('-----BEGIN PUBLIC KEY-----', '').replace('-----END PUBLIC KEY-----', '');
-        } catch (err) {
-            _logger.error(err.stack);
-            return res.status(200).json(success(false, res.statusCode, "unable to extract public key from given certificate.", null));
-        }
+        const new_app_name = appData.display_name?.length ? appData.display_name : appData.app_name.replace(/^uat_/, '');
 
-        if (!ip_addresses || ip_addresses.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter ip addresses.", null));
-        }
-
-        const joinip_addresses_list = ip_addresses.split(',').join('|');
-        const ip_addresses_list = joinip_addresses_list.split('|');
-        let ipAddress = [];
-        for (const element of ip_addresses_list) {
-            if (element && element.length > 0) {
-                if (!db.isValidIP(element)) {
-                    return res.status(200).json(success(false, res.statusCode, "Please enter valid ip addresses.", null));
-                } else {
-                    ipAddress.push(element);
-                }
-            }
-        }
-        let _callback_url = '';
-        if (callback_url !== null && callback_url.trim().length > 0) {
-            _callback_url = callback_url.trim()
-        }
-
-        if (_callback_url && _callback_url.length > 0) {
-            if (!db.isValidURL(_callback_url)) {
-                return res.status(200).json(success(false, res.statusCode, "Please enter valid callback url.", null));
-            }
-        }
-
-        let live_environment = true;
-
-        let new_app_name = appData.app_name;
-        new_app_name = (appData.display_name && appData.display_name.length > 0 ? appData.display_name : new_app_name.replace(/^uat_/, ''));
-
-        // Create new live app using ORM
         const newLiveApp = await CstAppMast.create({
             customer_id: req.token_data.customer_id,
             app_name: new_app_name,
             description: appData.description,
             expected_volume: appData.expected_volume,
             callback_url: _callback_url,
-            ip_addresses: ipAddress.join(','),
-            certificate_file: certificate,
+            ip_addresses: ipResult.validIps.join(','),
+            certificate_file: certResult.certificateUrl,
             is_enabled: true,
             is_deleted: false,
             added_date: db.get_ist_current_date(),
             is_approved: 0,
-            in_live_env: live_environment,
-            cert_public_key: publicKeySingleLine,
+            in_live_env: true,
+            cert_public_key: certResult.publicKeySingleLine,
             display_name: appData.display_name
         });
-        const app_id_new = newLiveApp ? newLiveApp.app_id : 0;
-        const _query1 = `INSERT INTO cst_app_mast`;
-        const _replacements2 = [req.token_data.customer_id, new_app_name, appData.description, appData.expected_volume, _callback_url, ipAddress.join(','), certificate, true, false, db.get_ist_current_date(), false, live_environment, publicKeySingleLine, appData.display_name];
 
-        if (app_id_new > 0) {
-            // Update original app using ORM
-            await CstAppMast.update(
-                { is_live_app_created: true, live_app_id: app_id_new },
-                { where: { app_id: _app_id } }
-            );
-
-            // Get app products using ORM
-            const { CstAppProduct } = getModels();
-            const appProducts = await CstAppProduct.findAll({
-                attributes: ['app_id', 'product_id'],
-                where: { app_id: _app_id }
-            });
-
-            // Create app products for new live app using ORM
-            for (const item of appProducts) {
-                await CstAppProduct.create({ app_id: app_id_new, product_id: item.product_id });
-            }
-
-            try {
-                let data_to_log = {
-                    correlation_id: correlator.getId(),
-                    token_id: req.token_data.token_id,
-                    account_id: req.token_data.account_id,
-                    user_type: 2,
-                    user_id: req.token_data.customer_id,
-                    narration: 'Created new app Live App name = ' + new_app_name,
-                    query: db.buildQuery_Array(_query1, _replacements2),
-                    date_time: db.get_ist_current_date(),
-                }
-                action_logger.info(JSON.stringify(data_to_log));
-            } catch (_) { }
-
-            return res.status(200).json(success(true, res.statusCode, "App Move to Live successfully.", null));
-        } else {
+        const app_id_new = newLiveApp?.app_id || 0;
+        if (app_id_new <= 0) {
             return res.status(200).json(success(false, res.statusCode, "Unable to move your app, Please try again.", null));
         }
+
+        await CstAppMast.update({ is_live_app_created: true, live_app_id: app_id_new }, { where: { app_id: _app_id } });
+
+        const appProducts = await CstAppProduct.findAll({ attributes: ['product_id'], where: { app_id: _app_id } });
+        for (const item of appProducts) {
+            await CstAppProduct.create({ app_id: app_id_new, product_id: item.product_id });
+        }
+
+        try {
+            action_logger.info(JSON.stringify({
+                correlation_id: correlator.getId(),
+                token_id: req.token_data.token_id,
+                account_id: req.token_data.account_id,
+                user_type: 2,
+                user_id: req.token_data.customer_id,
+                narration: 'Created new app Live App name = ' + new_app_name,
+                query: 'INSERT INTO cst_app_mast',
+                date_time: db.get_ist_current_date(),
+            }));
+        } catch (_) { }
+
+        return res.status(200).json(success(true, res.statusCode, "App Move to Live successfully.", null));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
@@ -1925,91 +1804,68 @@ const delete_uploaded_filesss = (req) => {
     }
 }
 
+// Helper to get product IDs for analytics
+const getAnalyticsProductIds = async (appId, productId) => {
+    if (productId > 0) return [productId];
+    const query = `SELECT app_id, product_id FROM cst_app_product WHERE app_id = ?`;
+    const rows = await db.sequelize.query(query, { replacements: [appId], type: QueryTypes.SELECT });
+    return rows.filter(app => app.product_id > 0).map(app => app.product_id);
+};
+
+// Helper to build analytics URL
+const buildAnalyticsUrl = (environment, from, upto, email, productName, appName) => {
+    return `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/environments/${environment}/stats/apiproxy/?select=sum(message_count)%2Csum(is_error)%2Csum(policy_error)%2Csum(target_error)%2Cavg(target_response_time)%2Cavg(total_response_time)&timeRange=${from}~${upto}&filter=(developer_email eq '${email}')and(api_product in ${productName})and(developer_app eq '${appName}')`;
+};
+
 const analytics = async (req, res, next) => {
-    const { app_id, from_date, upto_date, product_id, proxy_id } = req.body;
+    const { app_id, from_date, upto_date, product_id } = req.body;
 
     try {
-        let _app_id = app_id && validator.isNumeric(app_id.toString()) ? parseInt(app_id) : 0;
-        // let _proxy_id = proxy_id && validator.isNumeric(proxy_id.toString()) ? parseInt(proxy_id) : 0;
-        let _product_id = product_id && validator.isNumeric(product_id.toString()) ? parseInt(product_id) : 0;
-
+        const _app_id = parseNumericId(app_id);
+        const _product_id = parseNumericId(product_id);
         const _from = moment(from_date).format('MM/DD/YYYY%20HH:mm');
         const _upto = moment(upto_date).format('MM/DD/YYYY%20HH:mm');
-        // let _from='10/01/2023%2000:00';
-        // let _upto='11/05/2023%2023:59'; 
-        let prodIds = [];
-        if (_product_id > 0) {
-            prodIds.push(_product_id);
-        }
-        else {
-            const _query5 = `select app_id, product_id from cst_app_product WHERE app_id = ? `;
-            const row5 = await db.sequelize.query(_query5, { replacements: [_app_id], type: QueryTypes.SELECT });
-            for (const app of row5) {
-                if (app.product_id > 0) {
-                    prodIds.push(app.product_id);
-                }
-            }
-        }
+
+        const prodIds = await getAnalyticsProductIds(_app_id, _product_id);
+
         const _query = `SELECT a.app_id, a.customer_id, a.app_name, a.in_live_env, cs.email_id FROM cst_app_mast a
                          INNER JOIN cst_customer cs ON a.customer_id = cs.customer_id WHERE a.app_id = ? AND a.is_deleted = false`;
         const row = await db.sequelize.query(_query, { replacements: [_app_id], type: QueryTypes.SELECT });
-        if (!row || row.length <= 0) {
+        if (!row?.length) {
             return res.status(200).json(success(false, res.statusCode, "App details not found.", null));
         }
 
-        // const _query3 = `SELECT proxy_id, proxy_name FROM proxies  WHERE proxy_id = ? AND is_deleted = false  ORDER BY proxy_id DESC`;
-        // const row3 = await db.sequelize.query(_query3, { replacements: [_proxy_id], type: QueryTypes.SELECT });
-        // if (!row3 || row3.length <= 0) {
-        //     return res.status(200).json(success(false, res.statusCode, "proxy details not found.", null));
-        // }
-
-        let productNames = [];
         const _query1 = `SELECT p.product_id, p.product_name FROM product p WHERE p.product_id in (?) AND p.is_deleted = false`;
         const row1 = await db.sequelize.query(_query1, { replacements: [prodIds], type: QueryTypes.SELECT });
-        if (!row1 || row1.length <= 0) {
+        if (!row1?.length) {
             return res.status(200).json(success(false, res.statusCode, "products details not found.", null));
         }
-        for (const element of row1) {
-            productNames.push(`'${element.product_name}'`);
-        }
-        const product_name = productNames.join(', ');
-        const email = row[0].email_id;
-        const app_name = row[0].app_name;
-        // const proxy_name = row3[0].proxy_name;
-        let environment = '';
-        if (row[0].in_live_env && row[0].in_live_env == true) {
-            environment = 'prod-01';
-        } else {
-            environment = 'uat-01';
-        }
+
+        const productNames = row1.map(el => `'${el.product_name}'`).join(', ');
+        const { email_id: email, app_name, in_live_env } = row[0];
+        const environment = in_live_env ? 'prod-01' : 'uat-01';
         // const product_URL = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/environments/${environment}/stats/apiproxy/?select=sum(message_count)%2Csum(is_error)%2Csum(policy_error)%2Csum(target_error)%2Cavg(target_response_time)%2Cavg(total_response_time)%2Cmin(response_processing_latency)%2Cmax(response_processing_latency)%2Csum(message_count)&timeRange=${_from}~${_upto}&filter=(developer_email eq '${email}')and(api_product in ${product_name})and(developer_app eq '${app_name}') `;
         // const product_URL = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/environments/${environment}/stats/apiproxy/?select=sum(message_count)%2Csum(is_error)%2Csum(policy_error)%2Csum(target_error)%2Cavg(target_response_time)%2Cavg(total_response_time)%2Cmin(response_processing_latency)%2Cmax(response_processing_latency)%2Csum(message_count)&timeRange=${_from}~${_upto}&filter=(developer_email eq '${email}')and(api_product in ${product_name})and(developer_app eq '${app_name}')and(apiproxy in '${proxy_name}')`;
-        const product_URL = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/environments/${environment}/stats/apiproxy/?select=sum(message_count)%2Csum(is_error)%2Csum(policy_error)%2Csum(target_error)%2Cavg(target_response_time)%2Cavg(total_response_time)&timeRange=${_from}~${_upto}&filter=(developer_email eq '${email}')and(api_product in ${product_name})and(developer_app eq '${app_name}')`;
-        // const product_URL = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/environments/${environment}/stats/apiproxy/?select=sum(message_count)%2Csum(is_error)%2Csum(policy_error)%2Csum(target_error)%2Cavg(target_response_time)%2Cavg(total_response_time)&timeRange=${_from}~${_upto}&filter=(apiproxy in '${proxy_name}')`;
-        //const product_URL = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/environments/${environment}/stats/apiproxy/?select=sum(message_count)%2Csum(is_error)%2Csum(policy_error)%2Csum(target_error)%2Cavg(target_response_time)%2Cavg(total_response_time)%2Cmin(response_processing_latency)%2Cmax(response_processing_latency)%2Csum(message_count)&timeRange=${_from}~${_upto}&filter=(developer_email eq '${email}') `;
-        //const product_URL = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/environments/${environment}/stats/apiproxy/?select=sum(message_count)%2Csum(is_error)%2Csum(policy_error)%2Csum(target_error)%2Cavg(target_response_time)%2Cavg(total_response_time)%2Cmin(response_processing_latency)%2Cmax(response_processing_latency)%2Csum(message_count)&timeRange=${_from}~${_upto}&filter=(developer_app eq '${app_name}') `;
-        //const product_URL = `https://${process.env.API_PRODUCT_HOST}/v1/organizations/${process.env.API_PRODUCT_ORGANIZATION}/environments/${environment}/stats/apiproxy/?select=sum(message_count)%2Csum(is_error)%2Csum(policy_error)%2Csum(target_error)%2Csum(message_count)&timeRange=${_from}~${_upto}&filter=(developer_email eq '${email}')and(api_product in ${product_name})and(developer_app eq '${app_name}')and(apiproxy in '${proxy_name}')`;
+        const product_URL = buildAnalyticsUrl(environment, _from, _upto, email, productNames, app_name);
 
         console.log(product_URL);
         const apigeeAuth = await db.get_apigee_token();
-        const responseMain = await fetch(product_URL, {
-            method: "GET", headers: { Authorization: `Bearer ${apigeeAuth}`, },
-        });
+        const responseMain = await fetch(product_URL, { method: "GET", headers: { Authorization: `Bearer ${apigeeAuth}` } });
         const data = await responseMain.json();
+
         try {
-            let data_to_log = {
+            action_logger.info(JSON.stringify({
                 correlation_id: correlator.getId(),
                 token_id: req.token_data.token_id,
                 account_id: req.token_data.account_id,
                 user_type: 2,
                 user_id: req.token_data.customer_id,
-                narration: 'Analytics API(' + (environment == 'prod-01' ? 'Live' : 'Sandbox') + '). App name = ' + (app_name),
+                narration: 'Analytics API(' + (in_live_env ? 'Live' : 'Sandbox') + '). App name = ' + app_name,
                 query: product_URL,
                 date_time: db.get_ist_current_date(),
-            }
-            action_logger.info(JSON.stringify(data_to_log));
+            }));
+        } catch (err) { console.log(err.stack); }
 
-        } catch (err) { console.log(err.stack) }
         return res.status(200).json(success(true, res.statusCode, "suceess.", data));
 
     } catch (err) {
@@ -2176,92 +2032,78 @@ const live_sandbox_proxies = async (req, res, next) => {
     }
 };
 
+// Helper to format live proxy result
+const formatLiveProxyResult = (endpointData, productData, schemaData) => ({
+    product: {
+        id: endpointData.proxy.product_id,
+        name: productData.product_name,
+        display_name: productData.display_name,
+        icon: productData.product_icon || '',
+        definition_yaml: productData.product_open_spec || '',
+        definition_json: productData.product_open_spec_json || '',
+        api_doc_version: productData.api_doc_version,
+    },
+    proxy: {
+        proxy_name: endpointData.proxy.proxy_name,
+        endpoint_url: endpointData.endpoint_url,
+        endpoint_name: endpointData.display_name,
+        methods: endpointData.methods,
+        path_params: endpointData.path_params,
+        header_param: endpointData.header_param,
+        request_schema: endpointData.request_schema,
+        request_sample: endpointData.request_sample,
+        updated_endpoint: endpointData.updated_endpoint,
+    },
+    schema: {
+        status: schemaData.status_code,
+        path_params: schemaData.path_params,
+        headers: schemaData.header_json,
+        req_schema: schemaData.req_schema,
+        req_json: schemaData.req_json,
+        res_schema: schemaData.res_schema,
+        res_json: schemaData.res_json,
+    },
+    uat_portal: process.env.UAT_SITE_URL,
+    prod_portal: process.env.PROD_SITE_URL,
+});
+
 const live_proxy_data = async (req, res, next) => {
     const { endpoint } = req.body;
     try {
-        let endpoint_id = endpoint && validator.isNumeric(endpoint.toString()) ? parseInt(endpoint) : 0;
-        const { Endpoint, Proxies, Product, ProxySchema } = getModels();
+        const endpoint_id = parseNumericId(endpoint);
+        const { Endpoint, Proxies, Product } = getModels();
 
         const row1 = await Endpoint.findOne({
             attributes: ['endpoint_id', 'display_name', 'endpoint_url', 'updated_endpoint', 'methods', 'path_params', 'header_param', 'request_schema', 'request_sample'],
-            where: {
-                endpoint_id: endpoint_id,
-                is_deleted: false,
-                [Op.or]: [{ is_published: true }, { is_product_published: true }]
-            },
-            include: [{
-                model: Proxies,
-                as: 'proxy',
-                attributes: ['proxy_id', 'product_id', 'proxy_name'],
-                where: { is_published: true, is_deleted: false },
-                required: true
-            }]
+            where: { endpoint_id, is_deleted: false, [Op.or]: [{ is_published: true }, { is_product_published: true }] },
+            include: [{ model: Proxies, as: 'proxy', attributes: ['proxy_id', 'product_id', 'proxy_name'], where: { is_published: true, is_deleted: false }, required: true }]
         });
-        if (row1) {
-            const row2 = await Product.findOne({
-                attributes: ['product_name', 'display_name', 'product_icon', 'product_open_spec', 'product_open_spec_json', 'api_doc_version'],
-                where: {
-                    product_id: row1.proxy.product_id,
-                    is_deleted: false,
-                    [Op.or]: [{ is_published: true }, { is_product_published: true }]
-                }
-            });
-            if (row2) {
-                // Complex subquery with MAX and GROUP BY - keeping as raw SQL
-                const _query3 = `SELECT status_code, path_params, header_json, req_schema, req_json, res_schema, res_json, req_schema_updated, res_schema_updated
-                                FROM proxy_schema WHERE schema_id IN (
-                                    SELECT MAX(schema_id) AS schema_id FROM proxy_schema WHERE endpoint_id = ? AND is_deleted = false AND is_enabled = true GROUP BY status_code
-                                )
-                                ORDER BY CAST (status_code AS INTEGER) LIMIT 1`;
-                const row3 = await db.sequelize.query(_query3, { replacements: [endpoint_id], type: QueryTypes.SELECT });
-                if (row3 && row3.length > 0) {
-                    let product_icon = row2.product_icon && row2.product_icon.length > 0 ? row2.product_icon : '';
-                    let product_open_spec = row2.product_open_spec && row2.product_open_spec.length > 0 ? row2.product_open_spec : '';
-                    let product_open_spec_json = row2.product_open_spec_json && row2.product_open_spec_json.length > 0 ? row2.product_open_spec_json : '';
 
-                    const results = {
-                        product: {
-                            id: row1.proxy.product_id,
-                            name: row2.product_name,
-                            display_name: row2.display_name,
-                            icon: product_icon,
-                            definition_yaml: product_open_spec,
-                            definition_json: product_open_spec_json,
-                            api_doc_version: row2.api_doc_version,
-                        },
-                        proxy: {
-                            proxy_name: row1.proxy.proxy_name,
-                            endpoint_url: row1.endpoint_url,
-                            endpoint_name: row1.display_name,
-                            methods: row1.methods,
-                            path_params: row1.path_params,
-                            header_param: row1.header_param,
-                            request_schema: row1.request_schema,
-                            request_sample: row1.request_sample,
-                            updated_endpoint: row1.updated_endpoint,
-                        },
-                        schema: {
-                            status: row3[0].status_code,
-                            path_params: row3[0].path_params,
-                            headers: row3[0].header_json,
-                            req_schema: row3[0].req_schema,
-                            req_json: row3[0].req_json,
-                            res_schema: row3[0].res_schema,
-                            res_json: row3[0].res_json,
-                        },
-                        uat_portal: process.env.UAT_SITE_URL,
-                        prod_portal: process.env.PROD_SITE_URL,
-                    };
-                    return res.status(200).json(success(true, res.statusCode, "", results));
-                } else {
-                    return res.status(200).json(success(false, res.statusCode, "Api details not found, Please try again.", null));
-                }
-            } else {
-                return res.status(200).json(success(false, res.statusCode, "Product details not found, Please try again.", null));
-            }
-        } else {
+        if (!row1) {
             return res.status(200).json(success(false, res.statusCode, "Api details not found, Please try again.", null));
         }
+
+        const row2 = await Product.findOne({
+            attributes: ['product_name', 'display_name', 'product_icon', 'product_open_spec', 'product_open_spec_json', 'api_doc_version'],
+            where: { product_id: row1.proxy.product_id, is_deleted: false, [Op.or]: [{ is_published: true }, { is_product_published: true }] }
+        });
+
+        if (!row2) {
+            return res.status(200).json(success(false, res.statusCode, "Product details not found, Please try again.", null));
+        }
+
+        const _query3 = `SELECT status_code, path_params, header_json, req_schema, req_json, res_schema, res_json
+                        FROM proxy_schema WHERE schema_id IN (
+                            SELECT MAX(schema_id) AS schema_id FROM proxy_schema WHERE endpoint_id = ? AND is_deleted = false AND is_enabled = true GROUP BY status_code
+                        ) ORDER BY CAST(status_code AS INTEGER) LIMIT 1`;
+        const row3 = await db.sequelize.query(_query3, { replacements: [endpoint_id], type: QueryTypes.SELECT });
+
+        if (!row3?.length) {
+            return res.status(200).json(success(false, res.statusCode, "Api details not found, Please try again.", null));
+        }
+
+        const results = formatLiveProxyResult(row1, row2, row3[0]);
+        return res.status(200).json(success(true, res.statusCode, "", results));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
@@ -2270,98 +2112,85 @@ const live_proxy_data = async (req, res, next) => {
 
 const default_res = { status: 401, data: JSON.stringify({ "status": false, "error_code": 401, "error_description": "Invalid Access Token" }, null, 4), };
 
-const live_play_api = async (req, res, next) => {
-    const { endpoint, method, url, path_param, header_param, json_body } = req.body;
-    try {
+// Helper to check if required param is valid
+const isParamValid = (requiredParam, providedParams) => {
+    for (const element of providedParams || []) {
+        if (requiredParam.name === element.name && requiredParam.value === element.value) {
+            return true;
+        }
+    }
+    return false;
+};
 
-        let endpoint_id = endpoint && validator.isNumeric(endpoint.toString()) ? parseInt(endpoint) : 0;
+// Helper to get 401 response schema
+const get401Schema = async (endpointId) => {
+    const query = `SELECT status_code, res_json FROM proxy_schema WHERE endpoint_id = ? AND is_deleted = false AND is_enabled = true AND status_code = '401' ORDER BY schema_id DESC LIMIT 1`;
+    const rows = await db.sequelize.query(query, { replacements: [endpointId], type: QueryTypes.SELECT });
+    return rows?.[0] ? { status: rows[0].status_code, data: rows[0].res_json } : null;
+};
+
+// Helper to validate required params
+const validateRequiredParams = async (paramsJson, providedParams, endpointId) => {
+    if (!paramsJson?.length) return null;
+    const params = JSON.parse(paramsJson);
+    for (const param of params) {
+        if (param.is_required && !isParamValid(param, providedParams)) {
+            return await get401Schema(endpointId);
+        }
+    }
+    return null;
+};
+
+// Helper to find matching response by request body
+const findMatchingResponse = (schemas, jsonBody) => {
+    for (const element of schemas) {
+        try {
+            if (JSON.stringify(JSON.parse(element.req_json)) === JSON.stringify(jsonBody)) {
+                return { status: element.status_code, data: element.res_json };
+            }
+        } catch (_) { /* ignore parse errors */ }
+    }
+    return null;
+};
+
+const live_play_api = async (req, res, next) => {
+    const { endpoint, path_param, header_param, json_body } = req.body;
+    try {
+        const endpoint_id = parseNumericId(endpoint);
 
         const _query1 = `SELECT p.proxy_id, p.product_id, p.proxy_name, e.display_name, e.endpoint_url, e.updated_endpoint, e.methods, e.path_params, e.header_param, e.request_schema, e.request_sample
-        FROM endpoint e INNER JOIN proxies p ON e.proxy_id = p.proxy_id WHERE e.endpoint_id = ? AND (e.is_published = true OR e.is_product_published = true) AND e.is_deleted = false 
-        AND p.is_published = true AND p.is_deleted = false `;
+        FROM endpoint e INNER JOIN proxies p ON e.proxy_id = p.proxy_id WHERE e.endpoint_id = ? AND (e.is_published = true OR e.is_product_published = true) AND e.is_deleted = false
+        AND p.is_published = true AND p.is_deleted = false`;
         const row1 = await db.sequelize.query(_query1, { replacements: [endpoint_id], type: QueryTypes.SELECT });
-        if (row1 && row1.length > 0) {
-            if (row1[0].path_params && row1[0].path_params.length > 0) {
-                let ptemp = JSON.parse(row1[0].path_params);
-                for (let i = 0; ptemp && i < ptemp.length; i++) {
-                    if (ptemp[i].is_required && ptemp[i].is_required == true) {
-                        let is_exists = false; let value_matched = false;
-                        for (const element of path_param) {
-                            if (ptemp[i].name == element.name) {
-                                is_exists = true;
-                                if (ptemp[i].value == element.value) {
-                                    value_matched = true;
-                                }
-                                break;
-                            }
-                        }
-                        if (!is_exists || !value_matched) {
-                            const _query_p1 = `SELECT status_code, path_params, header_json, req_schema, req_json, res_schema, res_json
-                            FROM proxy_schema WHERE endpoint_id = ? AND is_deleted = false AND is_enabled = true AND status_code = '401' ORDER BY  schema_id DESC `;
-                            const row_p1 = await db.sequelize.query(_query_p1, { replacements: [endpoint_id], type: QueryTypes.SELECT });
-                            if (row_p1 && row_p1.length > 0) {
-                                const results = { status: row_p1[0].status_code, data: row_p1[0].res_json, };
-                                return res.status(200).json(success(true, res.statusCode, "success", results));
-                            }
-                        }
-                    }
-                }
-            }
-            if (row1[0].header_param && row1[0].header_param.length > 0) {
-                let htemp = JSON.parse(row1[0].header_param);
-                for (let i = 0; htemp && i < htemp.length; i++) {
-                    if (htemp[i].is_required && htemp[i].is_required == true) {
-                        let is_exists = false; let value_matched = false;
-                        for (const element of header_param) {
-                            if (htemp[i].name == element.name) {
-                                is_exists = true;
-                                if (htemp[i].value == element.value) {
-                                    value_matched = true;
-                                }
-                                break;
-                            }
-                        }
-                        if (!is_exists || !value_matched) {
-                            const _query_h1 = `SELECT status_code, path_params, header_json, req_schema, req_json, res_schema, res_json
-                            FROM proxy_schema WHERE endpoint_id = ? AND is_deleted = false AND is_enabled = true AND status_code = '401' ORDER BY schema_id DESC `;
-                            const row_h1 = await db.sequelize.query(_query_h1, { replacements: [endpoint_id], type: QueryTypes.SELECT });
-                            if (row_h1 && row_h1.length > 0) {
-                                const results = { status: row_h1[0].status_code, data: row_h1[0].res_json, };
-                                return res.status(200).json(success(true, res.statusCode, "success", results));
-                            }
-                        }
-                    }
-                }
-            }
 
-            const _query3 = `SELECT status_code, path_params, header_json, req_schema, req_json, res_schema, res_json
-            FROM proxy_schema WHERE endpoint_id = ? AND is_deleted = false AND is_enabled = true ORDER BY CAST (status_code AS INTEGER), schema_id DESC `;
-            const row3 = await db.sequelize.query(_query3, { replacements: [endpoint_id], type: QueryTypes.SELECT });
-            if (row3 && row3.length > 0) {
-                for (const element of row3) {
-                    try {
-                        if (JSON.stringify(JSON.parse(element.req_json)) == JSON.stringify(json_body)) {
-                            const results = {
-                                status: element.status_code,
-                                data: element.res_json,
-                            };
-                            return res.status(200).json(success(true, res.statusCode, "success", results));
-                        }
-                    } catch (_) {
-
-                    }
-                }
-                // no match found
-                //const results = { status: row3[row3.length - 1].status_code, data: row3[row3.length - 1].res_json, };
-                return res.status(200).json(success(true, res.statusCode, "success", default_res));
-            } else {
-                // no entry found...
-                return res.status(200).json(success(true, res.statusCode, "success", default_res));
-            }
-        } else {
-            //Api details not found
+        if (!row1?.length) {
             return res.status(200).json(success(true, res.statusCode, "success", default_res));
         }
+
+        // Validate path params
+        const pathValidation = await validateRequiredParams(row1[0].path_params, path_param, endpoint_id);
+        if (pathValidation) {
+            return res.status(200).json(success(true, res.statusCode, "success", pathValidation));
+        }
+
+        // Validate header params
+        const headerValidation = await validateRequiredParams(row1[0].header_param, header_param, endpoint_id);
+        if (headerValidation) {
+            return res.status(200).json(success(true, res.statusCode, "success", headerValidation));
+        }
+
+        // Find matching response
+        const _query3 = `SELECT status_code, req_json, res_json FROM proxy_schema WHERE endpoint_id = ? AND is_deleted = false AND is_enabled = true ORDER BY CAST(status_code AS INTEGER), schema_id DESC`;
+        const row3 = await db.sequelize.query(_query3, { replacements: [endpoint_id], type: QueryTypes.SELECT });
+
+        if (row3?.length) {
+            const matchedResponse = findMatchingResponse(row3, json_body);
+            if (matchedResponse) {
+                return res.status(200).json(success(true, res.statusCode, "success", matchedResponse));
+            }
+        }
+
+        return res.status(200).json(success(true, res.statusCode, "success", default_res));
     } catch (err) {
         _logger.error(err.stack);
         return res.status(500).json(success(false, res.statusCode, err.message, null));
@@ -3417,7 +3246,7 @@ const wallet_balance_pay_chk = async (req, res, next) => {
                 where: { unique_id: _payment_id }
             });
             if (row) {
-                const is_success = (row.is_success && row.is_success == true ? true : false);
+                const is_success = !!row.is_success;
                 const results = {
                     is_success: is_success,
                     bank_ref_no: row.bank_ref_no,
