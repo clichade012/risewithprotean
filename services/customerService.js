@@ -2701,7 +2701,7 @@ const cst_analytics_reports_generate_excel = async (req, res, next) => {
     const { from_date, upto_date } = req.body;
     try {
         const _customer_id = req.token_data.customer_id;
-        const { _page_no, _type } = parseExportParams(req.body);
+        const { _type } = parseExportParams(req.body);
         const email_id = await getCustomerEmail(_customer_id);
 
         if (_customer_id > 0) {

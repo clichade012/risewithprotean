@@ -7,6 +7,7 @@ import path from 'path';
 
 export default ({ config }) => {
     const router = config.express.Router();
+    // NOSONAR - Content length limit (5MB) is enforced in multer instance below
     const storage = multer.diskStorage({
         destination: function (req, file, cb) { cb(null, 'uploads/'); },
         filename: function (req, file, cb) { cb(null, Date.now() + path.extname(file.originalname)); },
@@ -21,7 +22,7 @@ export default ({ config }) => {
             cb(new Error('Invalid file extension.'), false); // Reject the file
         }
     }
-    const upload = multer({ storage: storage, fileFilter: fileFilter, });
+    const upload = multer({ storage: storage, fileFilter: fileFilter, limits: { fileSize: 5 * 1024 * 1024 } }); // 5MB limit
 
     router.post('/login', (req, res, next) => {
         return customerService.login(req, res, next);

@@ -3,7 +3,7 @@ import { Constants } from '../model/constantModel.js';
 import { JWT } from 'google-auth-library';
 import { createRequire } from 'module';
 import { parse } from 'date-fns';
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import fs from 'fs';
 import moment from 'moment-timezone';
 import { logger as _logger } from '../logger/winston.js';
@@ -289,13 +289,31 @@ function upto_date(date) {
     }
 }
 
+// Allowed languages for curl conversion (whitelist)
+const ALLOWED_CURL_LANGUAGES = ['python', 'javascript', 'node', 'php', 'go', 'java', 'ruby', 'rust', 'csharp', 'swift', 'kotlin', 'r', 'matlab', 'dart', 'elixir', 'clojure', 'cfml', 'http', 'wget', 'ansible', 'json'];
+
 function curl_to_code(curl, language) {
     if (!curl || !language) { return null; }
+
+    // Validate language against whitelist to prevent command injection
+    const sanitizedLanguage = language.toLowerCase().trim();
+    if (!ALLOWED_CURL_LANGUAGES.includes(sanitizedLanguage)) {
+        console.error('Curl conversion failed: Invalid language specified');
+        return null;
+    }
+
     try {
         let cleanedCurl = curl.trim().replace(/^curl\s+/, '').replace(/\\\n/g, '').replace(/ --header '/g, ' -H "')
             .replace(/' --data/g, '" --data').replace(/\n/g, '').replace(/' -H "/g, '" -H "');
-        const command = `curlconverter "${cleanedCurl}" --language ${language}`;
-        const result = execSync(command, { encoding: 'utf8', stdio: 'pipe' }).trim();
+
+        // Using execFileSync with arguments array - safer than execSync as it doesn't spawn a shell
+        // Arguments are passed directly to the executable, preventing shell injection
+        const result = execFileSync('curlconverter', [cleanedCurl, '--language', sanitizedLanguage], { // NOSONAR - Input validated via whitelist, execFileSync doesn't use shell
+            encoding: 'utf8',
+            stdio: 'pipe',
+            timeout: 10000,
+            maxBuffer: 1024 * 1024 // 1MB limit
+        }).trim();
         return result || null;
     } catch (error) {
         console.error('Curl conversion failed:', error.message);

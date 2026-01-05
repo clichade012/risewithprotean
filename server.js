@@ -81,8 +81,29 @@ app.use(bodyParser.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-// CORS
-app.use(cors());
+// CORS - Configure with allowed origins
+const corsOptions = {
+  origin: function (origin, callback) {
+    const allowedOrigins = [
+      process.env.FRONT_SITE_URL?.replace(/\/$/, ''),
+      process.env.UAT_SITE_URL?.replace(/\/$/, ''),
+      process.env.PROD_SITE_URL?.replace(/\/$/, ''),
+      'http://localhost:3000',
+      'http://localhost:3001'
+    ].filter(Boolean);
+
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-access-token', 'x-auth-key', 'x-correlation-id']
+};
+app.use(cors(corsOptions));
 
 // Security
 app.disable('x-powered-by');

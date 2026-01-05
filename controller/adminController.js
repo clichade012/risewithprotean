@@ -75,12 +75,12 @@ import timeout from 'connect-timeout';
 
 const adminController = ({ config }) => {
     const router = config.express.Router();
+    // NOSONAR - Content length limit (10MB) is enforced in multer instance below
     const storage = multer.diskStorage({
         destination: function (req, file, cb) {
             cb(null, 'uploads/');
         },
         filename: function (req, file, cb) {
-
             cb(null, Date.now() + path.extname(file.originalname));
         },
     });
@@ -94,7 +94,7 @@ const adminController = ({ config }) => {
             cb(new Error("Invalid file extension."), false);
         }
     }
-    const upload = multer({ storage: storage, fileFilter: fileFilter, });
+    const upload = multer({ storage: storage, fileFilter: fileFilter, limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB limit
 
 
     /**
@@ -321,7 +321,7 @@ const adminController = ({ config }) => {
         }
     }
 
-    const cms_image_uploader = multer({ storage: storage, fileFilter: cms_file_filter, });
+    const cms_image_uploader = multer({ storage: storage, fileFilter: cms_file_filter, limits: { fileSize: 5 * 1024 * 1024 } }); // 5MB limit for images
 
     router.post('/cms_home_get', jwtAdmin, (req, res, next) => {
         return admCmsHomeService.cms_home_get(req, res, next);

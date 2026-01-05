@@ -1177,6 +1177,19 @@ const proxy_endpoint_details_update = async (req, res, next) => {
     }
 };
 
+// Helper: Find duplicate API method page
+const findApiMethodPage = async (ProductPages, product_id, show_api_method, excludePageId = null) => {
+    if (!show_api_method) return null;
+    const where = { product_id, show_api_method: true, is_deleted: false };
+    if (excludePageId) where.page_id = { [Op.ne]: excludePageId };
+    return ProductPages.findOne({ where, attributes: ['menu_name'], raw: true });
+};
+
+// Helper: Format menu name change for logging
+const formatMenuNameChange = (oldName, newName) => {
+    return oldName === newName ? newName : `${oldName} to ${newName}`;
+};
+
 const product_pages_set = async (req, res, next) => {
     const { page_id, product_id, menu_name, show_helpful_box, show_api_method, page_contents, show_page_header_nav, sort_order } = req.body;
     const { ProductPages } = db.models;
@@ -1198,16 +1211,10 @@ const product_pages_set = async (req, res, next) => {
             return res.status(200).json(success(false, API_STATUS.ALREADY_EXISTS.value, "Menu name is already exists.", null));
         }
 
-        // Check for duplicate API method page
-        const checkApiMethodPage = async (excludePageId = null) => {
-            if (!show_api_method) return null;
-            const where = { product_id: _product_id, show_api_method: true, is_deleted: false };
-            if (excludePageId) where.page_id = { [Op.ne]: excludePageId };
-            return ProductPages.findOne({ where, attributes: ['menu_name'], raw: true });
-        };
+        const isUpdate = _page_id > 0 && _product_id > 0;
 
         // Update existing page
-        if (_page_id > 0 && _product_id > 0) {
+        if (isUpdate) {
             const pageRow = await ProductPages.findOne({
                 where: { page_id: _page_id, is_deleted: false },
                 attributes: ['product_id', 'page_id', 'menu_name'],
@@ -1217,7 +1224,7 @@ const product_pages_set = async (req, res, next) => {
                 return res.status(200).json(success(false, res.statusCode, "Product Pages details not found, Please try again.", null));
             }
 
-            const apiMethodPage = await checkApiMethodPage(_page_id);
+            const apiMethodPage = await findApiMethodPage(ProductPages, _product_id, show_api_method, _page_id);
             if (apiMethodPage) {
                 return res.status(200).json(success(false, API_STATUS.ALREADY_EXISTS.value, "You can add only one api reference page. You have added in menu : \"" + apiMethodPage.menu_name + "\"", null));
             }
@@ -1232,13 +1239,13 @@ const product_pages_set = async (req, res, next) => {
                 return res.status(200).json(success(false, res.statusCode, "Unable to update, Please try again", null));
             }
 
-            logAction(req, 'API product updated. Product Menu name: ' + (pageRow.menu_name == menu_name ? menu_name : pageRow.menu_name + ' to ' + menu_name),
+            logAction(req, 'API product updated. Product Menu name: ' + formatMenuNameChange(pageRow.menu_name, menu_name),
                 `ProductPages.update({ menu_name: '${menu_name}' }, { where: { page_id: ${_page_id} }})`);
             return res.status(200).json(success(true, res.statusCode, "Updated successfully.", null));
         }
 
         // Create new page
-        const apiMethodPage = await checkApiMethodPage();
+        const apiMethodPage = await findApiMethodPage(ProductPages, _product_id, show_api_method);
         if (apiMethodPage) {
             return res.status(200).json(success(false, API_STATUS.ALREADY_EXISTS.value, "You can add only one api reference page. You have added in menu : \"" + apiMethodPage.menu_name + "\"", null));
         }
@@ -1249,7 +1256,7 @@ const product_pages_set = async (req, res, next) => {
             is_published: true, show_page_header_nav, sort_order: _sort_order
         });
 
-        if ((newPage?.page_id ?? 0) <= 0) {
+        if (!newPage?.page_id) {
             return res.status(200).json(success(false, res.statusCode, "Unable to save, Please try again", null));
         }
 
@@ -1360,6 +1367,43 @@ const product_pages_menu_delete = async (req, res, next) => {
     }
 }
 
+// Helper: Validate proxy schema required fields
+const validateProxySchemaFields = (status_code, req_json, res_json) => {
+    if (!status_code?.length) return "Please select status code.";
+    if (!req_json?.length) return "Please enter request sample json.";
+    if (!res_json?.length) return "Please enter response sample json.";
+    return null;
+};
+
+// Helper: Generate schema from JSON if not provided
+const generateSchemaFromJson = (schema, jsonStr, schemaName) => {
+    if (schema?.length) return schema;
+    try {
+        const parsed = JSON.parse(jsonStr);
+        const generated = generateSchema.json(schemaName, parsed);
+        delete generated.title;
+        return JSON.stringify(generated);
+    } catch (_) {
+        return schema;
+    }
+};
+
+// Helper: Get product_id from proxy if not set on endpoint
+const resolveProductId = async (Proxies, product_id, proxy_id) => {
+    if (product_id > 0 || proxy_id <= 0) return product_id;
+    const proxyRow = await Proxies.findOne({
+        where: { proxy_id, is_deleted: false },
+        attributes: ['product_id'],
+        raw: true
+    });
+    return proxyRow?.product_id || product_id;
+};
+
+// Helper: Format status code change for logging
+const formatStatusCodeChange = (oldCode, newCode) => {
+    return oldCode === newCode ? newCode : `${oldCode} to ${newCode}`;
+};
+
 const proxy_schema_set = async (req, res, next) => {
     const { schema_id, endpoint_id, status_code, req_json, res_json } = req.body;
     let { res_schema, req_schema } = req.body;
@@ -1368,31 +1412,13 @@ const proxy_schema_set = async (req, res, next) => {
         const _schema_id = parseNumericWithDefault(schema_id);
         const _endpoint_id = parseNumericWithDefault(endpoint_id);
 
-        if (!status_code || status_code.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please select status code.", null));
-        }
-        if (!req_json || req_json.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter request sample json.", null));
-        }
-        if (!res_json || res_json.length <= 0) {
-            return res.status(200).json(success(false, res.statusCode, "Please enter response sample json.", null));
+        const validationError = validateProxySchemaFields(status_code, req_json, res_json);
+        if (validationError) {
+            return res.status(200).json(success(false, res.statusCode, validationError, null));
         }
 
-        // Generate schemas if not provided
-        try {
-            if (!res_schema || res_schema.length <= 0) {
-                const _res_json = JSON.parse(res_json);
-                const _res_schema = generateSchema.json('res_schema', _res_json);
-                delete _res_schema.title;
-                res_schema = JSON.stringify(_res_schema);
-            }
-            if (!req_schema || req_schema.length <= 0) {
-                const _req_json = JSON.parse(req_schema);
-                const _req_schema = generateSchema.json('req_schema', _req_json);
-                delete _req_schema.title;
-                req_schema = JSON.stringify(_req_schema);
-            }
-        } catch (_) { }
+        res_schema = generateSchemaFromJson(res_schema, res_json, 'res_schema');
+        req_schema = generateSchemaFromJson(req_schema, req_json, 'req_schema');
 
         const endpointRow = await Endpoint.findOne({
             where: { endpoint_id: _endpoint_id, is_deleted: false },
@@ -1403,18 +1429,8 @@ const proxy_schema_set = async (req, res, next) => {
             return res.status(200).json(success(false, res.statusCode, "Api not found, Please try again.", null));
         }
 
-        let _proxy_id = endpointRow.proxy_id;
-        let _product_id = endpointRow.product_id;
-
-        // Get product_id from proxy if not set
-        if (_product_id <= 0 && _proxy_id > 0) {
-            const proxyRow = await Proxies.findOne({
-                where: { proxy_id: _proxy_id, is_deleted: false },
-                attributes: ['product_id'],
-                raw: true
-            });
-            if (proxyRow) _product_id = proxyRow.product_id;
-        }
+        const _proxy_id = endpointRow.proxy_id;
+        const _product_id = await resolveProductId(Proxies, endpointRow.product_id, _proxy_id);
 
         // Update existing schema
         if (_schema_id > 0) {
@@ -1437,7 +1453,7 @@ const proxy_schema_set = async (req, res, next) => {
                 return res.status(200).json(success(false, res.statusCode, "Unable to update, Please try again", null));
             }
 
-            logAction(req, 'API Proxy schema updated. Proxy Status Code: ' + (schemaRow.status_code == status_code ? status_code : schemaRow.status_code + ' to ' + status_code),
+            logAction(req, 'API Proxy schema updated. Proxy Status Code: ' + formatStatusCodeChange(schemaRow.status_code, status_code),
                 `ProxySchema.update({ status_code: '${status_code}' }, { where: { schema_id: ${_schema_id} }})`);
             return res.status(200).json(success(true, res.statusCode, "Updated successfully.", null));
         }
@@ -1450,7 +1466,7 @@ const proxy_schema_set = async (req, res, next) => {
             added_date: db.get_ist_current_date(), req_schema_updated: true, res_schema_updated: true
         });
 
-        if ((newSchema?.schema_id ?? 0) <= 0) {
+        if (!newSchema?.schema_id) {
             return res.status(200).json(success(false, res.statusCode, "Unable to save, Please try again", null));
         }
 
