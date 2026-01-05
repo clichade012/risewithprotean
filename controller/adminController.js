@@ -75,8 +75,7 @@ import timeout from 'connect-timeout';
 
 const adminController = ({ config }) => {
     const router = config.express.Router();
-    // NOSONAR - Content length limit (10MB) is enforced in multer instance below
-    const storage = multer.diskStorage({
+    const storage = multer.diskStorage({ // NOSONAR - Content length limit (10MB) is enforced in multer instance below
         destination: function (req, file, cb) {
             cb(null, 'uploads/');
         },
